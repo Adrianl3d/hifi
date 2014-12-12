@@ -52,10 +52,11 @@
 //  2. Declare a text string.
 //  3. Call createNotifications(text) parsing the text.
 //  example:
-//  if (key.text == "a") {
-//      var noteString = "Turning to the Left";
-//      createNotification(noteString);
-//  }
+//    if (key.text == "q") { //queries number of users online
+//	var numUsers = GlobalServices.onlineUsers.length; 
+//	var welcome = "There are " + numUsers + " users online now.";
+//	createNotification(welcome);
+//    }
 
 
 var width = 340.0; //width of notification overlay
@@ -213,7 +214,7 @@ function keyPressEvent(key) {
 	var numUsers = GlobalServices.onlineUsers.length; 
 	var welcome = "There are " + numUsers + " users online now.";
 	createNotification(welcome);
-        }	
+    }	
 
     if (key.text == "s") { 		
         if (ctrlIsPressed == true){
