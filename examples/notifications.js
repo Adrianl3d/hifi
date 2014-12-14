@@ -349,16 +349,16 @@ function dismiss(firstNoteOut, firstButOut, firstOut) {
 }
 
 //  This is meant to show users online at startup but currently shows 0 users.
-function onConnected() {
-    var numUsers = GlobalServices.onlineUsers.length;
-    var welcome = "Welcome! There are " + numUsers + " users online now.";
-    createNotification(welcome);
-}
+//function onConnected() {
+//    var numUsers = GlobalServices.onlineUsers.length;
+//    var welcome = "Welcome! There are " + numUsers + " users online now.";
+//    createNotification(welcome);
+//}
 
 AudioDevice.muteToggled.connect(onMuteStateChanged);
 Controller.keyPressEvent.connect(keyPressEvent);
 Controller.mousePressEvent.connect(mousePressEvent);
-GlobalServices.connected.connect(onConnected);
+//GlobalServices.connected.connect(onConnected);
 GlobalServices.onlineUsersChanged.connect(onOnlineUsersChanged);
 GlobalServices.incomingMessage.connect(onIncomingMessage);
 Controller.keyReleaseEvent.connect(keyReleaseEvent);
