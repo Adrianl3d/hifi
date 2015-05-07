@@ -11,8 +11,6 @@
 
 #include "InterfaceConfig.h"
 
-#include <QOpenGLFramebufferObject>
-
 #include <glm/glm.hpp>
 
 #include <GlowEffect.h>
@@ -35,12 +33,8 @@ bool TV3DManager::isConnected() {
 }
 
 void TV3DManager::connect() {
-    auto glCanvas = Application::getInstance()->getGLWidget();
-    int width = glCanvas->getDeviceWidth();
-    int height = glCanvas->getDeviceHeight();
-    Camera& camera = *Application::getInstance()->getCamera();
-
-    configureCamera(camera, width, height);
+    auto deviceSize = qApp->getDeviceSize();
+    configureCamera(*(qApp->getCamera()), deviceSize.width(), deviceSize.height());
 }
 
 
@@ -93,9 +87,8 @@ void TV3DManager::display(Camera& whichCamera) {
     // left eye portal
     int portalX = 0;
     int portalY = 0;
-    auto glCanvas = Application::getInstance()->getGLWidget();
-    QSize deviceSize = glCanvas->getDeviceSize() *
-        Application::getInstance()->getRenderResolutionScale();
+    QSize deviceSize = qApp->getDeviceSize() *
+        qApp->getRenderResolutionScale();
     int portalW = deviceSize.width() / 2;
     int portalH = deviceSize.height();
 
@@ -103,17 +96,19 @@ void TV3DManager::display(Camera& whichCamera) {
 
     // We only need to render the overlays to a texture once, then we just render the texture as a quad
     // PrioVR will only work if renderOverlay is called, calibration is connected to Application::renderingOverlay() 
-    applicationOverlay.renderOverlay(true);
-    const bool displayOverlays = Menu::getInstance()->isOptionChecked(MenuOption::UserInterface);
+    applicationOverlay.renderOverlay();
 
     DependencyManager::get<GlowEffect>()->prepare();
-
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glEnable(GL_SCISSOR_TEST);
     // render left side view
     glViewport(portalX, portalY, portalW, portalH);
     glScissor(portalX, portalY, portalW, portalH);
+    
+    Camera eyeCamera;
+    eyeCamera.setRotation(whichCamera.getRotation());
+    eyeCamera.setPosition(whichCamera.getPosition());
 
     glPushMatrix();
     {
@@ -122,18 +117,18 @@ void TV3DManager::display(Camera& whichCamera) {
         glLoadIdentity(); // reset projection matrix
         glFrustum(_leftEye.left, _leftEye.right, _leftEye.bottom, _leftEye.top, nearZ, farZ); // set left view frustum
         GLfloat p[4][4];
+        // Really?
         glGetFloatv(GL_PROJECTION_MATRIX, &(p[0][0]));
-        GLfloat cotangent = p[1][1];
+        float cotangent = p[1][1];
         GLfloat fov = atan(1.0f / cotangent);
         glTranslatef(_leftEye.modelTranslation, 0.0, 0.0); // translate to cancel parallax
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
-        Application::getInstance()->displaySide(whichCamera, false, RenderArgs::STEREO_LEFT);
+        eyeCamera.setEyeOffsetPosition(glm::vec3(-_activeEye->modelTranslation,0,0));
+        Application::getInstance()->displaySide(eyeCamera, false, RenderArgs::MONO);
 
-        if (displayOverlays) {
-            applicationOverlay.displayOverlayTexture3DTV(whichCamera, _aspect, fov);
-        }
+        applicationOverlay.displayOverlayTextureStereo(whichCamera, _aspect, fov);
         _activeEye = NULL;
     }
     glPopMatrix();
@@ -150,7 +145,7 @@ void TV3DManager::display(Camera& whichCamera) {
         _activeEye = &_rightEye;
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity(); // reset projection matrix
-        glFrustum(_rightEye.left, _rightEye.right, _rightEye.bottom, _rightEye.top, nearZ, farZ); // set left view frustum
+        glFrustum(_rightEye.left, _rightEye.right, _rightEye.bottom, _rightEye.top, nearZ, farZ); // set right view frustum
         GLfloat p[4][4];
         glGetFloatv(GL_PROJECTION_MATRIX, &(p[0][0]));
         GLfloat cotangent = p[1][1];
@@ -159,11 +154,10 @@ void TV3DManager::display(Camera& whichCamera) {
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
-        Application::getInstance()->displaySide(whichCamera, false, RenderArgs::STEREO_RIGHT);
+        eyeCamera.setEyeOffsetPosition(glm::vec3(-_activeEye->modelTranslation,0,0));
+        Application::getInstance()->displaySide(eyeCamera, false, RenderArgs::MONO);
 
-        if (displayOverlays) {
-            applicationOverlay.displayOverlayTexture3DTV(whichCamera, _aspect, fov);
-        }
+        applicationOverlay.displayOverlayTextureStereo(whichCamera, _aspect, fov);
         _activeEye = NULL;
     }
     glPopMatrix();

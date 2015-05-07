@@ -10,6 +10,7 @@
 //
 
 #include <QCommandLineParser>
+#include <QThread>
 
 #include <LogHandler.h>
 #include <SharedUtil.h>
@@ -78,6 +79,9 @@ AssignmentClientApp::AssignmentClientApp(int argc, char* argv[]) :
     const QCommandLineOption maxChildsOption(ASSIGNMENT_MAX_FORKS_OPTION, "maximum number of children", "child-count");
     parser.addOption(maxChildsOption);
 
+    const QCommandLineOption ppidOption(PARENT_PID_OPTION, "parent's process id", "pid");
+    parser.addOption(ppidOption);
+
 
     if (!parser.parse(QCoreApplication::arguments())) {
         qCritical() << parser.errorText() << endl;
@@ -107,6 +111,11 @@ AssignmentClientApp::AssignmentClientApp(int argc, char* argv[]) :
     unsigned int maxForks = 0;
     if (parser.isSet(maxChildsOption)) {
         maxForks = parser.value(maxChildsOption).toInt();
+    }
+
+    int ppid = 0;
+    if (parser.isSet(ppidOption)) {
+        ppid = parser.value(ppidOption).toInt();
     }
 
     if (!numForks && minForks) {
@@ -172,14 +181,19 @@ AssignmentClientApp::AssignmentClientApp(int argc, char* argv[]) :
         }
     }
 
+    QThread::currentThread()->setObjectName("main thread");
+
+    DependencyManager::registerInheritance<LimitedNodeList, NodeList>();
 
     if (numForks || minForks || maxForks) {
-        AssignmentClientMonitor monitor(numForks, minForks, maxForks, assignmentPool,
+        AssignmentClientMonitor monitor(numForks, minForks, maxForks, requestAssignmentType, assignmentPool,
                                         walletUUID, assignmentServerHostname, assignmentServerPort);
+        connect(this, &QCoreApplication::aboutToQuit, &monitor, &AssignmentClientMonitor::aboutToQuit);
         exec();
     } else {
-        AssignmentClient client(requestAssignmentType, assignmentPool,
+        AssignmentClient client(ppid, requestAssignmentType, assignmentPool,
                                 walletUUID, assignmentServerHostname, assignmentServerPort);
+        connect(this, &QCoreApplication::aboutToQuit, &client, &AssignmentClient::aboutToQuit);
         exec();
     }
 }

@@ -14,32 +14,28 @@
 //  This script generates notifications created via a number of ways, such as:
 //  keystroke:
 //
-//  "q" returns number of users currently online (for debug purposes)
-
 //  CTRL/s for snapshot.
 //  CTRL/m for mic mute and unmute.
 
 //  System generated notifications:
-//  Displays users online at startup.
 //  If Screen is resized.
-//  Triggers notification if @MyUserName is mentioned in chat.
-//  Announces existing user logging out.
-//  Announces new user logging in.
 //  If mic is muted for any reason.
 //
 //  To add a new System notification type:
 //
 //  1. Set the Event Connector at the bottom of the script.
 //  example:
-//  GlobalServices.incomingMessage.connect(onIncomingMessage);
+//  AudioDevice.muteToggled.connect(onMuteStateChanged);
 //
 //  2. Create a new function to produce a text string, do not include new line returns.
 //  example:
-//  function onIncomingMessage(user, message) {
-//      //do stuff here;
-//      var text = "This is a notification";
-//      var wrappedText = wordWrap(text);
-//      createNotification(wrappedText, NotificationType.SNAPSHOT);
+//  function onMuteStateChanged() {
+//     var muteState,
+//         muteString;
+//
+//     muteState = AudioDevice.getMuted() ? "muted" : "unmuted";
+//     muteString = "Microphone is now " + muteState;
+//     createNotification(muteString, NotificationType.MUTE_TOGGLE);
 //  }
 //
 //  This new function must call wordWrap(text) if the length of message is longer than 42 chars or unknown.
@@ -47,18 +43,18 @@
 //  after that we will send it to createNotification(text).
 //  If the message is 42 chars or less you should bypass wordWrap() and call createNotification() directly.
 
-
 //  To add a keypress driven notification:
 //
 //  1. Add a key to the keyPressEvent(key).
 //  2. Declare a text string.
 //  3. Call createNotifications(text, NotificationType) parsing the text.
 //  example:
-//    var welcome;
-//    if (key.text == "q") { //queries number of users online
-//        var welcome = "There are " + GlobalServices.onlineUsers.length + " users online now.";
-//        createNotification(welcome, NotificationType.USERS_ONLINE);
-//    }
+//  if (key.text === "s") {
+//      if (ctrlIsPressed === true) {
+//          noteString = "Snapshot taken.";
+//          createNotification(noteString, NotificationType.SNAPSHOT);
+//      }
+//  }
 Script.include("./libraries/globals.js");
 Script.include("./libraries/soundArray.js");
 
@@ -81,8 +77,6 @@ var frame = 0;
 var ourWidth = Window.innerWidth;
 var ourHeight = Window.innerHeight;
 var text = "placeholder";
-var last_users = GlobalServices.onlineUsers;
-var users = [];
 var ctrlIsPressed = false;
 var ready = true;
 var MENU_NAME = 'Tools > Notifications';
@@ -90,24 +84,21 @@ var PLAY_NOTIFICATION_SOUNDS_MENU_ITEM = "Play Notification Sounds";
 var NOTIFICATION_MENU_ITEM_POST = " Notifications";
 var PLAY_NOTIFICATION_SOUNDS_SETTING = "play_notification_sounds";
 var PLAY_NOTIFICATION_SOUNDS_TYPE_SETTING_PRE = "play_notification_sounds_type_";
+var lodTextID = false;
 
 var NotificationType = {
     UNKNOWN: 0,
-    USER_JOINS: 1,
-    USER_LEAVES: 2,
-    MUTE_TOGGLE: 3,
-    CHAT_MENTION: 4,
-    USERS_ONLINE: 5,
-    SNAPSHOT: 6,
-    WINDOW_RESIZE: 7,
+    MUTE_TOGGLE: 1,
+    SNAPSHOT: 2,
+    WINDOW_RESIZE: 3,
+    LOD_WARNING: 4,
+    CONNECTION_REFUSED: 5,
     properties: [
-        { text: "User Join" },
-        { text: "User Leave" },
         { text: "Mute Toggle" },
-        { text: "Chat Mention" },
-        { text: "Users Online" },
         { text: "Snapshot" },
-        { text: "Window Resize" }
+        { text: "Window Resize" },
+        { text: "Level of Detail" },
+        { text: "Connection Refused" }
     ],
     getTypeFromMenuItem: function(menuItemName) {
         if (menuItemName.substr(menuItemName.length - NOTIFICATION_MENU_ITEM_POST.length) !== NOTIFICATION_MENU_ITEM_POST) {
@@ -156,6 +147,10 @@ function createArrays(notice, button, createTime, height, myAlpha) {
 
 //  This handles the final dismissal of a notification after fading
 function dismiss(firstNoteOut, firstButOut, firstOut) {
+    if (firstNoteOut == lodTextID) {
+        lodTextID = false;
+    }
+
     Overlays.deleteOverlay(firstNoteOut);
     Overlays.deleteOverlay(firstButOut);
     notifications.splice(firstOut, 1);
@@ -274,7 +269,8 @@ function notify(notice, button, height) {
             height: noticeHeight
         });
     } else {
-        notifications.push((Overlays.addOverlay("text", notice)));
+        var notificationText = Overlays.addOverlay("text", notice);
+        notifications.push((notificationText));
         buttons.push((Overlays.addOverlay("image", button)));
     }
 
@@ -285,6 +281,7 @@ function notify(notice, button, height) {
     last = notifications.length - 1;
     createArrays(notifications[last], buttons[last], times[last], heights[last], myAlpha[last]);
     fadeIn(notifications[last], buttons[last]);
+    return notificationText;
 }
 
 //  This function creates and sizes the overlays
@@ -344,11 +341,15 @@ function createNotification(text, notificationType) {
         randomSounds.playRandom();
     }
 
-    notify(noticeProperties, buttonProperties, height);
+    return notify(noticeProperties, buttonProperties, height);
 }
 
 function deleteNotification(index) {
-    Overlays.deleteOverlay(notifications[index]);
+    var notificationTextID = notifications[index];
+    if (notificationTextID == lodTextID) {
+        lodTextID = false;
+    }
+    Overlays.deleteOverlay(notificationTextID);
     Overlays.deleteOverlay(buttons[index]);
     notifications.splice(index, 1);
     buttons.splice(index, 1);
@@ -476,15 +477,9 @@ var STARTUP_TIMEOUT = 500,  // ms
     startingUp = true,
     startupTimer = null;
 
-//  This reports the number of users online at startup
-function reportUsers() {
-    createNotification("Welcome! There are " + GlobalServices.onlineUsers.length + " users online now.", NotificationType.USERS_ONLINE);
-}
-
 function finishStartup() {
     startingUp = false;
     Script.clearTimeout(startupTimer);
-    reportUsers();
 }
 
 function isStartingUp() {
@@ -498,42 +493,6 @@ function isStartingUp() {
     return startingUp;
 }
 
-//  Triggers notification if a user logs on or off
-function onOnlineUsersChanged(users) {
-    var i;
-
-    if (!isStartingUp()) {  // Skip user notifications at startup.
-        for (i = 0; i < users.length; i += 1) {
-            if (last_users.indexOf(users[i]) === -1.0) {
-                createNotification(users[i] + " has joined", NotificationType.USER_JOINS);
-            }
-        }
-
-        for (i = 0; i < last_users.length; i += 1) {
-            if (users.indexOf(last_users[i]) === -1.0) {
-                createNotification(last_users[i] + " has left", NotificationType.USER_LEAVES);
-            }
-        }
-    }
-
-    last_users = users;
-}
-
-//  Triggers notification if @MyUserName is mentioned in chat and returns the message to the notification.
-function onIncomingMessage(user, message) {
-    var myMessage,
-        alertMe,
-        thisAlert;
-
-    myMessage =  message;
-    alertMe = "@" + GlobalServices.myUsername;
-    thisAlert = user + ": " + myMessage;
-
-    if (myMessage.indexOf(alertMe) > -1.0) {
-        CreateNotification(wordWrap(thisAlert), NotificationType.CHAT_MENTION);
-    }
-}
-
 //  Triggers mic mute notification
 function onMuteStateChanged() {
     var muteState,
@@ -542,6 +501,10 @@ function onMuteStateChanged() {
     muteState = AudioDevice.getMuted() ? "muted" : "unmuted";
     muteString = "Microphone is now " + muteState;
     createNotification(muteString, NotificationType.MUTE_TOGGLE);
+}
+
+function onDomainConnectionRefused(reason) {
+    createNotification("Connection refused: " + reason, NotificationType.CONNECTION_REFUSED );
 }
 
 //  handles mouse clicks on buttons
@@ -573,18 +536,10 @@ function keyReleaseEvent(key) {
 
 //  Triggers notification on specific key driven events
 function keyPressEvent(key) {
-    var numUsers,
-        welcome,
-        noteString;
+    var noteString;
 
     if (key.key === 16777249) {
         ctrlIsPressed = true;
-    }
-
-    if (key.text === "q") { //queries number of users online
-        numUsers = GlobalServices.onlineUsers.length;
-        welcome = "There are " + numUsers + " users online now.";
-        createNotification(welcome, NotificationType.USERS_ONLINE);
     }
 
     if (key.text === "s") {
@@ -638,14 +593,27 @@ function menuItemEvent(menuItem) {
     }
 }
 
+LODManager.LODDecreased.connect(function() {
+    var warningText = "\n"
+            + "Due to the complexity of the content, the \n"
+            + "level of detail has been decreased."
+            + "You can now see: \n" 
+            + LODManager.getLODFeedbackText();
+
+    if (lodTextID == false) {
+        lodTextID = createNotification(warningText, NotificationType.LOD_WARNING);
+    } else {
+        Overlays.editOverlay(lodTextID, { text: warningText });
+    }
+});
+
 AudioDevice.muteToggled.connect(onMuteStateChanged);
 Controller.keyPressEvent.connect(keyPressEvent);
 Controller.mousePressEvent.connect(mousePressEvent);
-GlobalServices.onlineUsersChanged.connect(onOnlineUsersChanged);
-GlobalServices.incomingMessage.connect(onIncomingMessage);
 Controller.keyReleaseEvent.connect(keyReleaseEvent);
 Script.update.connect(update);
 Script.scriptEnding.connect(scriptEnding);
 Menu.menuItemEvent.connect(menuItemEvent);
+Window.domainConnectionRefused.connect(onDomainConnectionRefused);
 
 setup();

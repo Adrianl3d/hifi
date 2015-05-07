@@ -28,16 +28,15 @@
 #include "ArrayBufferClass.h"
 #include "AudioScriptingInterface.h"
 #include "Quat.h"
+#include "ScriptCache.h"
 #include "ScriptUUID.h"
 #include "Vec3.h"
-
-class EntityScriptingInterface;
 
 const QString NO_SCRIPT("");
 
 const unsigned int SCRIPT_DATA_CALLBACK_USECS = floor(((1.0 / 60.0f) * 1000 * 1000) + 0.5);
 
-class ScriptEngine : public QScriptEngine {
+class ScriptEngine : public QScriptEngine, public ScriptUser {
     Q_OBJECT
 public:
     ScriptEngine(const QString& scriptContents = NO_SCRIPT,
@@ -45,9 +44,6 @@ public:
                  AbstractControllerScriptingInterface* controllerScriptingInterface = NULL);
 
     ~ScriptEngine();
-
-    /// Access the EntityScriptingInterface in order to initialize it with a custom packet sender and jurisdiction listener
-    static EntityScriptingInterface* getEntityScriptingInterface() { return &_entityScriptingInterface; }
 
     ArrayBufferClass* getArrayBufferClass() { return _arrayBufferClass; }
     
@@ -98,6 +94,9 @@ public:
     static void stopAllScripts(QObject* application);
     
     void waitTillDoneRunning();
+
+    virtual void scriptContentsAvailable(const QUrl& url, const QString& scriptContents);
+    virtual void errorInLoadingScript(const QUrl& url);
 
 public slots:
     void loadURL(const QUrl& scriptURL);
@@ -153,8 +152,6 @@ private:
     QObject* setupTimerWithInterval(const QScriptValue& function, int intervalMS, bool isSingleShot);
     void stopTimer(QTimer* timer);
 
-    static EntityScriptingInterface _entityScriptingInterface;
-
     AbstractControllerScriptingInterface* _controllerScriptingInterface;
     AvatarData* _avatarData;
     QString _scriptName;
@@ -167,8 +164,6 @@ private:
     ArrayBufferClass* _arrayBufferClass;
 
     QHash<QUuid, quint16> _outgoingScriptAudioSequenceNumbers;
-private slots:
-    void handleScriptDownload();
 
 private:
     static QSet<ScriptEngine*> _allKnownScriptEngines;

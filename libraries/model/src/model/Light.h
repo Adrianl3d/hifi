@@ -244,6 +244,10 @@ public:
     void setShowContour(float show);
     float getShowContour() const { return getSchema()._control.w; }
 
+    // If the light has an ambient (Indirect) component, then the Ambientintensity can be used to control its contribution to the lighting
+    void setAmbientIntensity(float intensity);
+    float getAmbientIntensity() const { return getSchema()._ambientIntensity; }
+
     // Spherical Harmonics storing the Ambien lighting approximation used for the Sun typed light
     void setAmbientSphere(const SphericalHarmonics& sphere) { _ambientSphere = sphere; }
     const SphericalHarmonics& getAmbientSphere() const { return _ambientSphere; }
@@ -252,27 +256,18 @@ public:
     // Schema to access the attribute values of the light
     class Schema {
     public:
-        Vec4 _position; 
-        Vec3 _direction;
-        float _spare0;
-        Color _color;
-        float _intensity;
-        Vec4 _attenuation;
-        Vec4 _spot;
-        Vec4 _shadow;
+        Vec4 _position{0.0f, 0.0f, 0.0f, 1.0f}; 
+        Vec3 _direction{0.0f, 0.0f, -1.0f};
+        float _ambientIntensity{0.0f};
+        Color _color{1.0f};
+        float _intensity{1.0f};
+        Vec4 _attenuation{1.0f};
+        Vec4 _spot{0.0f, 0.0f, 0.0f, 3.0f};
+        Vec4 _shadow{0.0f};
 
-        Vec4 _control;
+        Vec4 _control{0.0f, 0.0f, 0.0f, 0.0f};
 
-        Schema() :
-            _position(0.0f, 0.0f, 0.0f, 1.0f), 
-            _direction(0.0f, 0.0f, -1.0f),
-            _spare0(0.f), 
-            _color(1.0f),
-            _intensity(1.0f),
-            _attenuation(1.0f, 1.0f, 1.0f, 1.0f),
-            _spot(0.0f, 0.0f, 0.0f, 3.0f),
-            _control(0.0f)
-            {}
+        Schema() {}
     };
 
     const UniformBufferView& getSchemaBuffer() const { return _schemaBuffer; }
@@ -287,7 +282,7 @@ protected:
     const Schema& getSchema() const { return _schemaBuffer.get<Schema>(); }
     Schema& editSchema() { return _schemaBuffer.edit<Schema>(); }
 };
-typedef QSharedPointer< Light > LightPointer;
+typedef std::shared_ptr< Light > LightPointer;
 
 };
 

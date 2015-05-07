@@ -16,9 +16,12 @@
 
 #include "EntityTree.h"
 #include "EntityTreeElement.h"
+#include "EntitiesLogging.h"
+#include "ResourceCache.h"
 #include "ModelEntityItem.h"
 
 const QString ModelEntityItem::DEFAULT_MODEL_URL = QString("");
+const QString ModelEntityItem::DEFAULT_COMPOUND_SHAPE_URL = QString("");
 const QString ModelEntityItem::DEFAULT_ANIMATION_URL = QString("");
 const float ModelEntityItem::DEFAULT_ANIMATION_FRAME_INDEX = 0.0f;
 const bool ModelEntityItem::DEFAULT_ANIMATION_IS_PLAYING = false;
@@ -44,6 +47,7 @@ EntityItemProperties ModelEntityItem::getProperties() const {
 
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(color, getXColor);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(modelURL, getModelURL);
+    COPY_ENTITY_PROPERTY_TO_PROPERTIES(compoundShapeURL, getCompoundShapeURL);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(animationURL, getAnimationURL);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(animationIsPlaying, getAnimationIsPlaying);
     COPY_ENTITY_PROPERTY_TO_PROPERTIES(animationFrameIndex, getAnimationFrameIndex);
@@ -61,6 +65,7 @@ bool ModelEntityItem::setProperties(const EntityItemProperties& properties) {
 
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(color, setColor);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(modelURL, setModelURL);
+    SET_ENTITY_PROPERTY_FROM_PROPERTIES(compoundShapeURL, setCompoundShapeURL);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(animationURL, setAnimationURL);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(animationIsPlaying, setAnimationIsPlaying);
     SET_ENTITY_PROPERTY_FROM_PROPERTIES(animationFrameIndex, setAnimationFrameIndex);
@@ -74,7 +79,7 @@ bool ModelEntityItem::setProperties(const EntityItemProperties& properties) {
         if (wantDebug) {
             uint64_t now = usecTimestampNow();
             int elapsed = now - getLastEdited();
-            qDebug() << "ModelEntityItem::setProperties() AFTER update... edited AGO=" << elapsed <<
+            qCDebug(entities) << "ModelEntityItem::setProperties() AFTER update... edited AGO=" << elapsed <<
                     "now=" << now << " getLastEdited()=" << getLastEdited();
         }
         setLastEdited(properties._lastEdited);
@@ -89,11 +94,18 @@ int ModelEntityItem::readEntitySubclassDataFromBuffer(const unsigned char* data,
     
     int bytesRead = 0;
     const unsigned char* dataAt = data;
-
+    
     READ_ENTITY_PROPERTY_COLOR(PROP_COLOR, _color);
     READ_ENTITY_PROPERTY_STRING(PROP_MODEL_URL, setModelURL);
+    if (args.bitstreamVersion < VERSION_ENTITIES_HAS_COLLISION_MODEL) {
+        setCompoundShapeURL("");
+    } else if (args.bitstreamVersion == VERSION_ENTITIES_HAS_COLLISION_MODEL) {
+        READ_ENTITY_PROPERTY_STRING(PROP_COMPOUND_SHAPE_URL, setCompoundShapeURL);
+    } else {
+        READ_ENTITY_PROPERTY_STRING(PROP_COMPOUND_SHAPE_URL, setCompoundShapeURL);
+    }
     READ_ENTITY_PROPERTY_STRING(PROP_ANIMATION_URL, setAnimationURL);
-
+    
     // Because we're using AnimationLoop which will reset the frame index if you change it's running state
     // we want to read these values in the order they appear in the buffer, but call our setters in an
     // order that allows AnimationLoop to preserve the correct frame rate.
@@ -128,6 +140,7 @@ EntityPropertyFlags ModelEntityItem::getEntityProperties(EncodeBitstreamParams& 
     EntityPropertyFlags requestedProperties = EntityItem::getEntityProperties(params);
 
     requestedProperties += PROP_MODEL_URL;
+    requestedProperties += PROP_COMPOUND_SHAPE_URL;
     requestedProperties += PROP_ANIMATION_URL;
     requestedProperties += PROP_ANIMATION_FPS;
     requestedProperties += PROP_ANIMATION_FRAME_INDEX;
@@ -151,6 +164,7 @@ void ModelEntityItem::appendSubclassData(OctreePacketData* packetData, EncodeBit
 
     APPEND_ENTITY_PROPERTY(PROP_COLOR, appendColor, getColor());
     APPEND_ENTITY_PROPERTY(PROP_MODEL_URL, appendValue, getModelURL());
+    APPEND_ENTITY_PROPERTY(PROP_COMPOUND_SHAPE_URL, appendValue, getCompoundShapeURL());
     APPEND_ENTITY_PROPERTY(PROP_ANIMATION_URL, appendValue, getAnimationURL());
     APPEND_ENTITY_PROPERTY(PROP_ANIMATION_FPS, appendValue, getAnimationFPS());
     APPEND_ENTITY_PROPERTY(PROP_ANIMATION_FRAME_INDEX, appendValue, getAnimationFrameIndex());
@@ -253,17 +267,45 @@ void ModelEntityItem::update(const quint64& now) {
 }
 
 void ModelEntityItem::debugDump() const {
-    qDebug() << "ModelEntityItem id:" << getEntityItemID();
-    qDebug() << "    edited ago:" << getEditedAgo();
-    qDebug() << "    position:" << getPosition() * (float)TREE_SCALE;
-    qDebug() << "    dimensions:" << getDimensions() * (float)TREE_SCALE;
-    qDebug() << "    model URL:" << getModelURL();
+    qCDebug(entities) << "ModelEntityItem id:" << getEntityItemID();
+    qCDebug(entities) << "    edited ago:" << getEditedAgo();
+    qCDebug(entities) << "    position:" << getPosition();
+    qCDebug(entities) << "    dimensions:" << getDimensions();
+    qCDebug(entities) << "    model URL:" << getModelURL();
+    qCDebug(entities) << "    compound shape URL:" << getCompoundShapeURL();
 }
 
 void ModelEntityItem::updateShapeType(ShapeType type) {
+    // BEGIN_TEMPORARY_WORKAROUND
+    // we have allowed inconsistent ShapeType's to be stored in SVO files in the past (this was a bug)
+    // but we are now enforcing the entity properties to be consistent.  To make the possible we're 
+    // introducing a temporary workaround: we will ignore ShapeType updates that conflict with the
+    // _compoundShapeURL.
+    if (hasCompoundShapeURL()) {
+        type = SHAPE_TYPE_COMPOUND;
+    }
+    // END_TEMPORARY_WORKAROUND
+
     if (type != _shapeType) {
         _shapeType = type;
         _dirtyFlags |= EntityItem::DIRTY_SHAPE | EntityItem::DIRTY_MASS;
+    }
+}
+
+// virtual 
+ShapeType ModelEntityItem::getShapeType() const {
+    if (_shapeType == SHAPE_TYPE_COMPOUND) {
+        return hasCompoundShapeURL() ? SHAPE_TYPE_COMPOUND : SHAPE_TYPE_NONE;
+    } else {
+        return _shapeType;
+    }
+}
+
+void ModelEntityItem::setCompoundShapeURL(const QString& url) {
+    if (_compoundShapeURL != url) {
+        _compoundShapeURL = url;
+        _dirtyFlags |= EntityItem::DIRTY_SHAPE | EntityItem::DIRTY_MASS;
+        _shapeType = _compoundShapeURL.isEmpty() ? SHAPE_TYPE_NONE : SHAPE_TYPE_COMPOUND;
     }
 }
 
@@ -275,11 +317,11 @@ void ModelEntityItem::setAnimationURL(const QString& url) {
 void ModelEntityItem::setAnimationFrameIndex(float value) {
 #ifdef WANT_DEBUG
     if (isAnimatingSomething()) {
-        qDebug() << "ModelEntityItem::setAnimationFrameIndex()";
-        qDebug() << "    value:" << value;
-        qDebug() << "    was:" << _animationLoop.getFrameIndex();
-        qDebug() << "    model URL:" << getModelURL();
-        qDebug() << "    animation URL:" << getAnimationURL();
+        qCDebug(entities) << "ModelEntityItem::setAnimationFrameIndex()";
+        qCDebug(entities) << "    value:" << value;
+        qCDebug(entities) << "    was:" << _animationLoop.getFrameIndex();
+        qCDebug(entities) << "    model URL:" << getModelURL();
+        qCDebug(entities) << "    animation URL:" << getAnimationURL();
     }
 #endif
     _animationLoop.setFrameIndex(value);
@@ -302,12 +344,12 @@ void ModelEntityItem::setAnimationSettings(const QString& value) {
         float frameIndex = settingsMap["frameIndex"].toFloat();
 #ifdef WANT_DEBUG
         if (isAnimatingSomething()) {
-            qDebug() << "ModelEntityItem::setAnimationSettings() calling setAnimationFrameIndex()...";
-            qDebug() << "    model URL:" << getModelURL();
-            qDebug() << "    animation URL:" << getAnimationURL();
-            qDebug() << "    settings:" << value;
-            qDebug() << "    settingsMap[frameIndex]:" << settingsMap["frameIndex"];
-            qDebug("    frameIndex: %20.5f", frameIndex);
+            qCDebug(entities) << "ModelEntityItem::setAnimationSettings() calling setAnimationFrameIndex()...";
+            qCDebug(entities) << "    model URL:" << getModelURL();
+            qCDebug(entities) << "    animation URL:" << getAnimationURL();
+            qCDebug(entities) << "    settings:" << value;
+            qCDebug(entities) << "    settingsMap[frameIndex]:" << settingsMap["frameIndex"];
+            qCDebug(entities"    frameIndex: %20.5f", frameIndex);
         }
 #endif
 

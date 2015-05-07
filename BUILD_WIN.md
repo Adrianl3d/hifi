@@ -14,17 +14,13 @@ Or you can start a regular command prompt and then run:
 
 If using Visual Studio 2013 and building as a Visual Studio 2013 project you need the Windows 8 SDK which you should already have as part of installing Visual Studio 2013. You should be able to see it at `C:\Program Files (x86)\Windows Kits\8.1\Lib\winv6.3\um\x86`.
 
-####nmake & msbuild
+####nmake
 
-Some of the external projects may require nmake and msbuild to compile and install. If they are not installed at the locations listed below, please ensure that both are in your PATH so CMake can find them when required. 
+Some of the external projects may require nmake to compile and install. If it is not installed at the location listed below, please ensure that it is in your PATH so CMake can find it when required. 
 
 We expect nmake.exe to be located at the following path.
 
     C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\bin
-
-We expect msbuild.exe to be located at the following path.
-
-    C:\Program Files (x86)\MSBUILD\12.0\Bin
 
 ###Qt
 You can use the online installer or the offline installer. If you use the offline installer, be sure to select the "OpenGL" version.
@@ -33,12 +29,12 @@ NOTE: Qt does not support 64-bit builds on Windows 7, so you must use the 32-bit
 
 * [Download the online installer](http://qt-project.org/downloads)
     * When it asks you to select components, ONLY select the following:
-        * Qt > Qt 5.3.2 > **msvc2013 32-bit OpenGL**
+        * Qt > Qt 5.4.1 > **msvc2013 32-bit OpenGL**
 
-* [Download the offline installer](http://download.qt-project.org/official_releases/qt/5.3/5.3.2/qt-opensource-windows-x86-msvc2013_opengl-5.3.2.exe)
+* [Download the offline installer](http://download.qt.io/official_releases/qt/5.4/5.4.1/qt-opensource-windows-x86-msvc2013_opengl-5.4.1.exe)
 
 Once Qt is installed, you need to manually configure the following:
-* Set the QT_CMAKE_PREFIX_PATH environment variable to your `Qt\5.3.2\msvc2013_opengl\lib\cmake` directory.
+* Set the QT_CMAKE_PREFIX_PATH environment variable to your `Qt\5.4.1\msvc2013_opengl\lib\cmake` directory.
   * You can set an environment variable from Control Panel > System > Advanced System Settings > Environment Variables > New
 
 ###External Libraries
@@ -75,7 +71,7 @@ Your system may already have several versions of the OpenSSL DLL's (ssleay32.dll
 
 To prevent these problems, install OpenSSL yourself. Download the following binary packages [from this website](http://slproweb.com/products/Win32OpenSSL.html):
 * Visual C++ 2008 Redistributables
-* Win32 OpenSSL v1.0.1L
+* Win32 OpenSSL v1.0.1m
 
 Install OpenSSL into the Windows system directory, to make sure that Qt uses the version that you've just installed, and not some other version.
 

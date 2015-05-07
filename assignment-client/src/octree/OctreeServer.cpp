@@ -20,6 +20,8 @@
 #include <AccountManager.h>
 #include <HTTPConnection.h>
 #include <LogHandler.h>
+#include <NetworkingConstants.h>
+#include <NumericalConstants.h>
 #include <UUID.h>
 
 #include "../AssignmentClient.h"
@@ -252,7 +254,7 @@ OctreeServer::OctreeServer(const QByteArray& packet) :
     
     // make sure the AccountManager has an Auth URL for payment redemptions
     
-    AccountManager::getInstance().setAuthURL(DEFAULT_NODE_AUTH_URL);
+    AccountManager::getInstance().setAuthURL(NetworkingConstants::METAVERSE_SERVER_URL);
 }
 
 OctreeServer::~OctreeServer() {
@@ -265,16 +267,19 @@ OctreeServer::~OctreeServer() {
     }
 
     if (_jurisdictionSender) {
+        _jurisdictionSender->terminating();
         _jurisdictionSender->terminate();
         _jurisdictionSender->deleteLater();
     }
 
     if (_octreeInboundPacketProcessor) {
+        _octreeInboundPacketProcessor->terminating();
         _octreeInboundPacketProcessor->terminate();
         _octreeInboundPacketProcessor->deleteLater();
     }
 
     if (_persistThread) {
+        _persistThread->terminating();
         _persistThread->terminate();
         _persistThread->deleteLater();
     }
@@ -1036,6 +1041,13 @@ void OctreeServer::readConfiguration() {
         strcpy(_persistFilename, qPrintable(persistFilename));
         qDebug("persistFilename=%s", _persistFilename);
 
+        QString persistAsFileType;
+        if (!readOptionString(QString("persistAsFileType"), settingsSectionObject, persistAsFileType)) {
+            persistAsFileType = "svo";
+        }
+        _persistAsFileType = persistAsFileType;
+        qDebug() << "persistAsFileType=" << _persistAsFileType;
+
         _persistInterval = OctreePersistThread::DEFAULT_PERSIST_INTERVAL;
         readOptionInt(QString("persistInterval"), settingsSectionObject, _persistInterval);
         qDebug() << "persistInterval=" << _persistInterval;
@@ -1087,8 +1099,6 @@ void OctreeServer::readConfiguration() {
 }
 
 void OctreeServer::run() {
-    qInstallMessageHandler(LogHandler::verboseMessageHandler);
-
     _safeServerName = getMyServerName();
 
     // Before we do anything else, create our tree...
@@ -1131,7 +1141,7 @@ void OctreeServer::run() {
 
         // now set up PersistThread
         _persistThread = new OctreePersistThread(_tree, _persistFilename, _persistInterval,
-                                    _wantBackup, _settings, _debugTimestampNow);
+                                                 _wantBackup, _settings, _debugTimestampNow, _persistAsFileType);
         if (_persistThread) {
             _persistThread->initialize(true);
         }
@@ -1211,8 +1221,15 @@ void OctreeServer::forceNodeShutdown(SharedNodePointer node) {
 void OctreeServer::aboutToFinish() {
     qDebug() << qPrintable(_safeServerName) << "server STARTING about to finish...";
     qDebug() << qPrintable(_safeServerName) << "inform Octree Inbound Packet Processor that we are shutting down...";
-    _octreeInboundPacketProcessor->shuttingDown();
-    
+
+    if (_octreeInboundPacketProcessor) {
+        _octreeInboundPacketProcessor->terminating();
+    }
+
+    if (_jurisdictionSender) {
+        _jurisdictionSender->terminating();
+    }
+
     DependencyManager::get<NodeList>()->eachNode([this](const SharedNodePointer& node) {
         qDebug() << qPrintable(_safeServerName) << "server about to finish while node still connected node:" << *node;
         forceNodeShutdown(node);
@@ -1220,6 +1237,7 @@ void OctreeServer::aboutToFinish() {
     
     if (_persistThread) {
         _persistThread->aboutToFinish();
+        _persistThread->terminating();
     }
 
     qDebug() << qPrintable(_safeServerName) << "server ENDING about to finish...";

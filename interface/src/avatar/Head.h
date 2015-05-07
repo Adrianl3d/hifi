@@ -40,7 +40,7 @@ public:
     void init();
     void reset();
     void simulate(float deltaTime, bool isMine, bool billboard = false);
-    void render(float alpha, Model::RenderMode mode, bool postLighting);
+    void render(float alpha, ViewFrustum* renderFrustum, Model::RenderMode mode, bool postLighting);
     void setScale(float scale);
     void setPosition(glm::vec3 position) { _position = position; }
     void setAverageLoudness(float averageLoudness) { _averageLoudness = averageLoudness; }
@@ -55,9 +55,6 @@ public:
 
     /// \return orientationBody * orientationBasePitch
     glm::quat getCameraOrientation () const;
-
-    const glm::vec3& getAngularVelocity() const { return _angularVelocity; }
-    void setAngularVelocity(glm::vec3 angularVelocity) { _angularVelocity = angularVelocity; }
     
     void setCorrectedLookAtPosition(glm::vec3 correctedLookAtPosition);
     glm::vec3 getCorrectedLookAtPosition();
@@ -84,7 +81,7 @@ public:
     FaceModel& getFaceModel() { return _faceModel; }
     const FaceModel& getFaceModel() const { return _faceModel; }
     
-    const bool getReturnToCenter() const { return _returnHeadToCenter; } // Do you want head to try to return to center (depends on interface detected)
+    bool getReturnToCenter() const { return _returnHeadToCenter; } // Do you want head to try to return to center (depends on interface detected)
     float getAverageLoudness() const { return _averageLoudness; }
     /// \return the point about which scaling occurs.
     glm::vec3 getScalePivot() const;
@@ -109,7 +106,7 @@ public:
     void addLeanDeltas(float sideways, float forward);
     
 private:
-    glm::vec3 calculateAverageEyePosition() const { return _leftEyePosition + (_rightEyePosition - _leftEyePosition ) * ONE_HALF; }
+    glm::vec3 calculateAverageEyePosition() const { return _leftEyePosition + (_rightEyePosition - _leftEyePosition ) * 0.5f; }
 
     // disallow copies of the Head, copy of owning Avatar is disallowed too
     Head(const Head&);
@@ -130,7 +127,6 @@ private:
     float _mouth2;
     float _mouth3;
     float _mouth4;
-    glm::vec3 _angularVelocity;
     bool _renderLookatVectors;
     glm::vec3 _saccade;
     glm::vec3 _saccadeTarget;
@@ -158,6 +154,7 @@ private:
     
     // private methods
     void renderLookatVectors(glm::vec3 leftEyePosition, glm::vec3 rightEyePosition, glm::vec3 lookatPosition);
+    void calculateMouthShapes();
 
     friend class FaceModel;
 };

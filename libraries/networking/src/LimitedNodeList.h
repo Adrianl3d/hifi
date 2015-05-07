@@ -42,18 +42,20 @@ const quint64 NODE_SILENCE_THRESHOLD_MSECS = 2 * 1000;
 
 extern const char SOLO_NODE_TYPES[2];
 
-extern const QUrl DEFAULT_NODE_AUTH_URL;
-
 const char DEFAULT_ASSIGNMENT_SERVER_HOSTNAME[] = "localhost";
 
 const char STUN_SERVER_HOSTNAME[] = "stun.highfidelity.io";
 const unsigned short STUN_SERVER_PORT = 3478;
 
 const QString DOMAIN_SERVER_LOCAL_PORT_SMEM_KEY = "domain-server.local-port";
+const QString DOMAIN_SERVER_LOCAL_HTTP_PORT_SMEM_KEY = "domain-server.local-http-port";
+const QString DOMAIN_SERVER_LOCAL_HTTPS_PORT_SMEM_KEY = "domain-server.local-https-port";
 const QString ASSIGNMENT_CLIENT_MONITOR_LOCAL_PORT_SMEM_KEY = "assignment-client-monitor.local-port";
 
 const char DEFAULT_ASSIGNMENT_CLIENT_MONITOR_HOSTNAME[] = "localhost";
 const unsigned short DEFAULT_ASSIGNMENT_CLIENT_MONITOR_PORT = 40104;
+
+const QString USERNAME_UUID_REPLACEMENT_STATS_KEY = "$username";
 
 class HifiSockAddr;
 
@@ -82,8 +84,11 @@ public:
     const QUuid& getSessionUUID() const { return _sessionUUID; }
     void setSessionUUID(const QUuid& sessionUUID);
 
-    bool getThisNodeCanAdjustLocks() { return _thisNodeCanAdjustLocks; }
-    void setThisNodeCanAdjustLocks(bool canAdjustLocks) { _thisNodeCanAdjustLocks = canAdjustLocks; }
+    bool getThisNodeCanAdjustLocks() const { return _thisNodeCanAdjustLocks; }
+    void setThisNodeCanAdjustLocks(bool canAdjustLocks);
+
+    bool getThisNodeCanRez() const { return _thisNodeCanRez; }
+    void setThisNodeCanRez(bool canRez);
     
     void rebindNodeSocket();
     QUdpSocket& getNodeSocket() { return _nodeSocket; }
@@ -114,7 +119,8 @@ public:
     SharedNodePointer sendingNodeForPacket(const QByteArray& packet);
     
     SharedNodePointer addOrUpdateNode(const QUuid& uuid, NodeType_t nodeType,
-                                      const HifiSockAddr& publicSocket, const HifiSockAddr& localSocket, bool canAdjustLocks);
+                                      const HifiSockAddr& publicSocket, const HifiSockAddr& localSocket,
+                                      bool canAdjustLocks, bool canRez);
     
     const HifiSockAddr& getLocalSockAddr() const { return _localSockAddr; }
     const HifiSockAddr& getSTUNSockAddr() const { return _stunSockAddr; }
@@ -149,7 +155,18 @@ public:
             functor(it->second);
         }
     }
-    
+
+    template<typename PredLambda, typename NodeLambda>
+    void eachMatchingNode(PredLambda predicate, NodeLambda functor) {
+        QReadLocker readLock(&_nodeMutex);
+
+        for (NodeHash::const_iterator it = _nodeHash.cbegin(); it != _nodeHash.cend(); ++it) {
+            if (predicate(it->second)) {
+                functor(it->second);
+            }
+        }
+    }
+
     template<typename BreakableNodeLambda>
     void eachNodeBreakable(BreakableNodeLambda functor) {
         QReadLocker readLock(&_nodeMutex);
@@ -174,7 +191,7 @@ public:
         return SharedNodePointer();
     }
 
-    void putLocalPortIntoSharedMemory(const QString key, QObject* parent);
+    void putLocalPortIntoSharedMemory(const QString key, QObject* parent, quint16 localPort);
     bool getLocalServerPortFromSharedMemory(const QString key, QSharedMemory*& sharedMem, quint16& localPort);
     
 public slots:
@@ -194,6 +211,9 @@ signals:
     void localSockAddrChanged(const HifiSockAddr& localSockAddr);
     void publicSockAddrChanged(const HifiSockAddr& publicSockAddr);
 
+    void canAdjustLocksChanged(bool canAdjustLocks);
+    void canRezChanged(bool canRez);
+
     void dataSent(const quint8 channel_type, const int bytes);
     void dataReceived(const quint8 channel_type, const int bytes);
 
@@ -212,7 +232,6 @@ protected:
     void handleNodeKill(const SharedNodePointer& node);
 
     QUuid _sessionUUID;
-    bool _thisNodeCanAdjustLocks;
     NodeHash _nodeHash;
     QReadWriteLock _nodeMutex;
     QUdpSocket _nodeSocket;
@@ -226,6 +245,8 @@ protected:
     int _numCollectedBytes;
 
     QElapsedTimer _packetStatTimer;
+    bool _thisNodeCanAdjustLocks;
+    bool _thisNodeCanRez;
     
     template<typename IteratorLambda>
     void eachNodeHashIterator(IteratorLambda functor) {

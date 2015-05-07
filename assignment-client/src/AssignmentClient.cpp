@@ -18,6 +18,8 @@
 #include <AccountManager.h>
 #include <AddressManager.h>
 #include <Assignment.h>
+#include <AvatarHashMap.h>
+#include <EntityScriptingInterface.h>
 #include <LogHandler.h>
 #include <LogUtils.h>
 #include <LimitedNodeList.h>
@@ -39,8 +41,8 @@ SharedAssignmentPointer AssignmentClient::_currentAssignment;
 
 int hifiSockAddrMeta = qRegisterMetaType<HifiSockAddr>("HifiSockAddr");
 
-AssignmentClient::AssignmentClient(Assignment::Type requestAssignmentType, QString assignmentPool, QUuid walletUUID,
-                                   QString assignmentServerHostname, quint16 assignmentServerPort) :
+AssignmentClient::AssignmentClient(int ppid, Assignment::Type requestAssignmentType, QString assignmentPool,
+                                   QUuid walletUUID, QString assignmentServerHostname, quint16 assignmentServerPort) :
     _assignmentServerHostname(DEFAULT_ASSIGNMENT_SERVER_HOSTNAME),
     _localASPortSharedMem(NULL),
     _localACMPortSharedMem(NULL)
@@ -52,7 +54,11 @@ AssignmentClient::AssignmentClient(Assignment::Type requestAssignmentType, QStri
     // create a NodeList as an unassigned client
     DependencyManager::registerInheritance<LimitedNodeList, NodeList>();
     auto addressManager = DependencyManager::set<AddressManager>();
-    auto nodeList = DependencyManager::set<NodeList>(NodeType::Unassigned);
+    auto nodeList = DependencyManager::set<NodeList>(NodeType::Unassigned); // Order is important
+    
+    auto animationCache = DependencyManager::set<AnimationCache>();
+    auto avatarHashMap = DependencyManager::set<AvatarHashMap>();
+    auto entityScriptingInterface = DependencyManager::set<EntityScriptingInterface>();
 
     // make up a uuid for this child so the parent can tell us apart.  This id will be changed
     // when the domain server hands over an assignment.
@@ -104,7 +110,7 @@ AssignmentClient::AssignmentClient(Assignment::Type requestAssignmentType, QStri
     NetworkAccessManager::getInstance();
 
     // Hook up a timer to send this child's status to the Monitor once per second
-    setUpStatsToMonitor();
+    setUpStatsToMonitor(ppid);
 }
 
 
@@ -112,17 +118,33 @@ void AssignmentClient::stopAssignmentClient() {
     qDebug() << "Exiting.";
     _requestTimer.stop();
     _statsTimerACM.stop();
-    QCoreApplication::quit();
+    if (_currentAssignment) {
+        _currentAssignment->aboutToQuit();
+        QThread* currentAssignmentThread = _currentAssignment->thread();
+        currentAssignmentThread->quit();
+        currentAssignmentThread->wait();
+    }
 }
 
 
-void AssignmentClient::setUpStatsToMonitor() {
+void AssignmentClient::aboutToQuit() {
+    stopAssignmentClient();
+    // clear the log handler so that Qt doesn't call the destructor on LogHandler
+    qInstallMessageHandler(0);
+    // clear out pointer to the assignment so the destructor gets called.  if we don't do this here,
+    // it will get destroyed along with all the other "static" stuff.  various static member variables
+    // will be destroyed first and things go wrong.
+    _currentAssignment.clear();
+}
+
+
+void AssignmentClient::setUpStatsToMonitor(int ppid) {
     // Figure out the address to send out stats to
     quint16 localMonitorServerPort = DEFAULT_ASSIGNMENT_CLIENT_MONITOR_PORT;
     auto nodeList = DependencyManager::get<NodeList>();
 
-    nodeList->getLocalServerPortFromSharedMemory(ASSIGNMENT_CLIENT_MONITOR_LOCAL_PORT_SMEM_KEY,
-                                                 _localACMPortSharedMem, localMonitorServerPort);
+    nodeList->getLocalServerPortFromSharedMemory(QString(ASSIGNMENT_CLIENT_MONITOR_LOCAL_PORT_SMEM_KEY) + "-" +
+                                                 QString::number(ppid), _localACMPortSharedMem, localMonitorServerPort);
     _assignmentClientMonitorSocket = HifiSockAddr(DEFAULT_ASSIGNMENT_CLIENT_MONITOR_HOSTNAME, localMonitorServerPort, true);
 
     // send a stats packet every 1 seconds
@@ -195,6 +217,7 @@ void AssignmentClient::readPendingDatagrams() {
 
                     // start the deployed assignment
                     AssignmentThread* workerThread = new AssignmentThread(_currentAssignment, this);
+                    workerThread->setObjectName("worker");
 
                     connect(workerThread, &QThread::started, _currentAssignment.data(), &ThreadedAssignment::run);
                     connect(_currentAssignment.data(), &ThreadedAssignment::finished, workerThread, &QThread::quit);

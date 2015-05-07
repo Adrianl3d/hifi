@@ -20,7 +20,6 @@
 #include <AudioConstants.h>
 #include <AudioEffectOptions.h>
 #include <AvatarData.h>
-#include <Bitstream.h>
 #include <CollisionInfo.h>
 #include <EntityScriptingInterface.h>
 #include <NetworkAccessManager.h>
@@ -35,17 +34,19 @@
 #include "EventTypes.h"
 #include "MenuItemProperties.h"
 #include "ScriptAudioInjector.h"
+#include "ScriptCache.h"
+#include "ScriptEngineLogging.h"
 #include "ScriptEngine.h"
 #include "TypedArrays.h"
 #include "XMLHttpRequestClass.h"
 
+#include "SceneScriptingInterface.h"
+
 #include "MIDIEvent.h"
 
 
-EntityScriptingInterface ScriptEngine::_entityScriptingInterface;
-
 static QScriptValue debugPrint(QScriptContext* context, QScriptEngine* engine){
-    qDebug() << "script:print()<<" << context->argument(0).toString();
+    qCDebug(scriptengine) << "script:print()<<" << context->argument(0).toString();
     QString message = context->argument(0).toString()
         .replace("\\", "\\\\")
         .replace("\n", "\\n")
@@ -271,36 +272,31 @@ void ScriptEngine::loadURL(const QUrl& scriptURL) {
             _fileNameString = url.toLocalFile();
             QFile scriptFile(_fileNameString);
             if (scriptFile.open(QFile::ReadOnly | QFile::Text)) {
-                qDebug() << "ScriptEngine loading file:" << _fileNameString;
+                qCDebug(scriptengine) << "ScriptEngine loading file:" << _fileNameString;
                 QTextStream in(&scriptFile);
                 _scriptContents = in.readAll();
                 emit scriptLoaded(_fileNameString);
             } else {
-                qDebug() << "ERROR Loading file:" << _fileNameString;
+                qCDebug(scriptengine) << "ERROR Loading file:" << _fileNameString << "line:" << __LINE__;
                 emit errorLoadingScript(_fileNameString);
             }
         } else {
-            QNetworkAccessManager& networkAccessManager = NetworkAccessManager::getInstance();
-            QNetworkRequest networkRequest = QNetworkRequest(url);
-            networkRequest.setHeader(QNetworkRequest::UserAgentHeader, HIGH_FIDELITY_USER_AGENT);
-            QNetworkReply* reply = networkAccessManager.get(networkRequest);
-            connect(reply, &QNetworkReply::finished, this, &ScriptEngine::handleScriptDownload);
+            bool isPending;
+            auto scriptCache = DependencyManager::get<ScriptCache>();
+            scriptCache->getScript(url, this, isPending);
+            
         }
     }
 }
 
-void ScriptEngine::handleScriptDownload() {
-    QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
-    
-    if (reply->error() == QNetworkReply::NoError && reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) == 200) {
-        _scriptContents = reply->readAll();
-        emit scriptLoaded(_fileNameString);
-    } else {
-        qDebug() << "ERROR Loading file:" << reply->url().toString();
-        emit errorLoadingScript(_fileNameString);
-    }
-    
-    reply->deleteLater();
+void ScriptEngine::scriptContentsAvailable(const QUrl& url, const QString& scriptContents) {
+    _scriptContents = scriptContents;
+    emit scriptLoaded(_fileNameString);
+}
+
+void ScriptEngine::errorInLoadingScript(const QUrl& url) {
+    qCDebug(scriptengine) << "ERROR Loading file:" << url.toString() << "line:" << __LINE__;
+    emit errorLoadingScript(_fileNameString); // ??
 }
 
 void ScriptEngine::init() {
@@ -310,7 +306,8 @@ void ScriptEngine::init() {
     
     _isInitialized = true;
 
-    _entityScriptingInterface.init();
+    auto entityScriptingInterface = DependencyManager::get<EntityScriptingInterface>();
+    entityScriptingInterface->init();
 
     // register various meta-types
     registerMetaTypes(this);
@@ -320,7 +317,6 @@ void ScriptEngine::init() {
     registerAnimationTypes(this);
     registerAvatarTypes(this);
     registerAudioMetaTypes(this);
-    Bitstream::registerTypes(this);
 
     qScriptRegisterMetaType(this, EntityItemPropertiesToScriptValue, EntityItemPropertiesFromScriptValue);
     qScriptRegisterMetaType(this, EntityItemIDtoScriptValue, EntityItemIDfromScriptValue);
@@ -348,7 +344,7 @@ void ScriptEngine::init() {
     registerGlobalObject("Script", this);
     registerGlobalObject("Audio", &AudioScriptingInterface::getInstance());
     registerGlobalObject("Controller", _controllerScriptingInterface);
-    registerGlobalObject("Entities", &_entityScriptingInterface);
+    registerGlobalObject("Entities", entityScriptingInterface.data());
     registerGlobalObject("Quat", &_quatLibrary);
     registerGlobalObject("Vec3", &_vec3Library);
     registerGlobalObject("Uuid", &_uuidLibrary);
@@ -358,10 +354,6 @@ void ScriptEngine::init() {
     globalObject().setProperty("TREE_SCALE", newVariant(QVariant(TREE_SCALE)));
     globalObject().setProperty("COLLISION_GROUP_ENVIRONMENT", newVariant(QVariant(COLLISION_GROUP_ENVIRONMENT)));
     globalObject().setProperty("COLLISION_GROUP_AVATARS", newVariant(QVariant(COLLISION_GROUP_AVATARS)));
-
-    globalObject().setProperty("AVATAR_MOTION_OBEY_LOCAL_GRAVITY", newVariant(QVariant(AVATAR_MOTION_OBEY_LOCAL_GRAVITY)));
-    globalObject().setProperty("AVATAR_MOTION_OBEY_ENVIRONMENTAL_GRAVITY", newVariant(QVariant(AVATAR_MOTION_OBEY_ENVIRONMENTAL_GRAVITY)));
-
 }
 
 QScriptValue ScriptEngine::registerGlobalObject(const QString& name, QObject* object) {
@@ -411,7 +403,7 @@ void ScriptEngine::evaluate() {
     // will cause this code to never actually run...
     if (hasUncaughtException()) {
         int line = uncaughtExceptionLineNumber();
-        qDebug() << "Uncaught exception at (" << _fileNameString << ") line" << line << ":" << result.toString();
+        qCDebug(scriptengine) << "Uncaught exception at (" << _fileNameString << ") line" << line << ":" << result.toString();
         emit errorMessage("Uncaught exception at (" + _fileNameString + ") line" + QString::number(line) + ":" + result.toString());
         clearExceptions();
     }
@@ -426,7 +418,7 @@ QScriptValue ScriptEngine::evaluate(const QString& program, const QString& fileN
     QScriptValue result = QScriptEngine::evaluate(program, fileName, lineNumber);
     if (hasUncaughtException()) {
         int line = uncaughtExceptionLineNumber();
-        qDebug() << "Uncaught exception at (" << _fileNameString << " : " << fileName << ") line" << line << ": " << result.toString();
+        qCDebug(scriptengine) << "Uncaught exception at (" << _fileNameString << " : " << fileName << ") line" << line << ": " << result.toString();
     }
     _evaluatesPending--;
     emit evaluationFinished(result, hasUncaughtException());
@@ -465,6 +457,7 @@ void ScriptEngine::run() {
     int thisFrame = 0;
 
     auto nodeList = DependencyManager::get<NodeList>();
+    auto entityScriptingInterface = DependencyManager::get<EntityScriptingInterface>();
 
     qint64 lastUpdate = usecTimestampNow();
 
@@ -484,13 +477,13 @@ void ScriptEngine::run() {
             break;
         }
 
-        if (!_isFinished && _entityScriptingInterface.getEntityPacketSender()->serversExist()) {
+        if (!_isFinished && entityScriptingInterface->getEntityPacketSender()->serversExist()) {
             // release the queue of edit entity messages.
-            _entityScriptingInterface.getEntityPacketSender()->releaseQueuedMessages();
+            entityScriptingInterface->getEntityPacketSender()->releaseQueuedMessages();
 
             // since we're in non-threaded mode, call process so that the packets are sent
-            if (!_entityScriptingInterface.getEntityPacketSender()->isThreaded()) {
-                _entityScriptingInterface.getEntityPacketSender()->process();
+            if (!entityScriptingInterface->getEntityPacketSender()->isThreaded()) {
+                entityScriptingInterface->getEntityPacketSender()->process();
             }
         }
 
@@ -599,7 +592,7 @@ void ScriptEngine::run() {
 
         if (hasUncaughtException()) {
             int line = uncaughtExceptionLineNumber();
-            qDebug() << "Uncaught exception at (" << _fileNameString << ") line" << line << ":" << uncaughtException().toString();
+            qCDebug(scriptengine) << "Uncaught exception at (" << _fileNameString << ") line" << line << ":" << uncaughtException().toString();
             emit errorMessage("Uncaught exception at (" + _fileNameString + ") line" + QString::number(line) + ":" + uncaughtException().toString());
             clearExceptions();
         }
@@ -617,13 +610,13 @@ void ScriptEngine::run() {
     // kill the avatar identity timer
     delete _avatarIdentityTimer;
 
-    if (_entityScriptingInterface.getEntityPacketSender()->serversExist()) {
+    if (entityScriptingInterface->getEntityPacketSender()->serversExist()) {
         // release the queue of edit entity messages.
-        _entityScriptingInterface.getEntityPacketSender()->releaseQueuedMessages();
+        entityScriptingInterface->getEntityPacketSender()->releaseQueuedMessages();
 
         // since we're in non-threaded mode, call process so that the packets are sent
-        if (!_entityScriptingInterface.getEntityPacketSender()->isThreaded()) {
-            _entityScriptingInterface.getEntityPacketSender()->process();
+        if (!entityScriptingInterface->getEntityPacketSender()->isThreaded()) {
+            entityScriptingInterface->getEntityPacketSender()->process();
         }
     }
 
@@ -654,8 +647,10 @@ void ScriptEngine::stopAllTimers() {
 }
 
 void ScriptEngine::stop() {
-    _isFinished = true;
-    emit runningStateChanged();
+    if (!_isFinished) {
+        _isFinished = true;
+        emit runningStateChanged();
+    }
 }
 
 void ScriptEngine::timerFired() {
@@ -692,7 +687,7 @@ QObject* ScriptEngine::setupTimerWithInterval(const QScriptValue& function, int 
 
 QObject* ScriptEngine::setInterval(const QScriptValue& function, int intervalMS) {
     if (_stoppingAllScripts) {
-        qDebug() << "Script.setInterval() while shutting down is ignored... parent script:" << getFilename();
+        qCDebug(scriptengine) << "Script.setInterval() while shutting down is ignored... parent script:" << getFilename();
         return NULL; // bail early
     }
 
@@ -701,7 +696,7 @@ QObject* ScriptEngine::setInterval(const QScriptValue& function, int intervalMS)
 
 QObject* ScriptEngine::setTimeout(const QScriptValue& function, int timeoutMS) {
     if (_stoppingAllScripts) {
-        qDebug() << "Script.setTimeout() while shutting down is ignored... parent script:" << getFilename();
+        qCDebug(scriptengine) << "Script.setTimeout() while shutting down is ignored... parent script:" << getFilename();
         return NULL; // bail early
     }
 
@@ -751,7 +746,7 @@ void ScriptEngine::print(const QString& message) {
 // all of the files have finished loading.
 void ScriptEngine::include(const QStringList& includeFiles, QScriptValue callback) {
     if (_stoppingAllScripts) {
-        qDebug() << "Script.include() while shutting down is ignored..."
+        qCDebug(scriptengine) << "Script.include() while shutting down is ignored..."
                  << "includeFiles:" << includeFiles << "parent script:" << getFilename();
         return; // bail early
     }
@@ -766,7 +761,7 @@ void ScriptEngine::include(const QStringList& includeFiles, QScriptValue callbac
         for (QUrl url : urls) {
             QString contents = data[url];
             if (contents.isNull()) {
-                qDebug() << "Error loading file: " << url;
+                qCDebug(scriptengine) << "Error loading file: " << url << "line:" << __LINE__;
             } else {
                 QScriptValue result = evaluate(contents, url.toString());
             }
@@ -795,7 +790,7 @@ void ScriptEngine::include(const QStringList& includeFiles, QScriptValue callbac
 
 void ScriptEngine::include(const QString& includeFile, QScriptValue callback) {
     if (_stoppingAllScripts) {
-        qDebug() << "Script.include() while shutting down is ignored... " 
+        qCDebug(scriptengine) << "Script.include() while shutting down is ignored... " 
                  << "includeFile:" << includeFile << "parent script:" << getFilename();
         return; // bail early
     }
@@ -810,7 +805,7 @@ void ScriptEngine::include(const QString& includeFile, QScriptValue callback) {
 // the Application or other context will connect to in order to know to actually load the script
 void ScriptEngine::load(const QString& loadFile) {
     if (_stoppingAllScripts) {
-        qDebug() << "Script.load() while shutting down is ignored... "
+        qCDebug(scriptengine) << "Script.load() while shutting down is ignored... "
                  << "loadFile:" << loadFile << "parent script:" << getFilename();
         return; // bail early
     }

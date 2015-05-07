@@ -12,6 +12,7 @@
 #include <AACube.h>
 
 #include "EntitySimulation.h"
+#include "EntitiesLogging.h"
 #include "MovingEntitiesOperator.h"
 
 void EntitySimulation::setEntityTree(EntityTree* tree) {
@@ -87,22 +88,23 @@ void EntitySimulation::sortEntitiesThatMoved() {
     // External changes to entity position/shape are expected to be sorted outside of the EntitySimulation.
     PerformanceTimer perfTimer("sortingEntities");
     MovingEntitiesOperator moveOperator(_entityTree);
-    AACube domainBounds(glm::vec3(0.0f,0.0f,0.0f), 1.0f);
+    AACube domainBounds(glm::vec3(0.0f,0.0f,0.0f), (float)TREE_SCALE);
     QSet<EntityItem*>::iterator itemItr = _entitiesToBeSorted.begin();
     while (itemItr != _entitiesToBeSorted.end()) {
         EntityItem* entity = *itemItr;
         // check to see if this movement has sent the entity outside of the domain.
         AACube newCube = entity->getMaximumAACube();
         if (!domainBounds.touches(newCube)) {
-            qDebug() << "Entity " << entity->getEntityItemID() << " moved out of domain bounds.";
+            qCDebug(entities) << "Entity " << entity->getEntityItemID() << " moved out of domain bounds.";
             _entitiesToDelete.insert(entity);
             _mortalEntities.remove(entity);
             _updateableEntities.remove(entity);
             removeEntityInternal(entity);
+            itemItr = _entitiesToBeSorted.erase(itemItr);
         } else {
             moveOperator.addEntityToMoveList(entity, newCube);
+            ++itemItr;
         }
-        ++itemItr;
     }
     if (moveOperator.hasMovingEntities()) {
         PerformanceTimer perfTimer("recurseTreeWithOperator");
@@ -150,10 +152,10 @@ void EntitySimulation::entityChanged(EntityItem* entity) {
     bool wasRemoved = false;
     uint32_t dirtyFlags = entity->getDirtyFlags();
     if (dirtyFlags & EntityItem::DIRTY_POSITION) {
-        AACube domainBounds(glm::vec3(0.0f,0.0f,0.0f), 1.0f);
+        AACube domainBounds(glm::vec3(0.0f,0.0f,0.0f), (float)TREE_SCALE);
         AACube newCube = entity->getMaximumAACube();
         if (!domainBounds.touches(newCube)) {
-            qDebug() << "Entity " << entity->getEntityItemID() << " moved out of domain bounds.";
+            qCDebug(entities) << "Entity " << entity->getEntityItemID() << " moved out of domain bounds.";
             _entitiesToDelete.insert(entity);
             _mortalEntities.remove(entity);
             _updateableEntities.remove(entity);

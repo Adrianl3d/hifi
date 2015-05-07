@@ -18,7 +18,7 @@ Light::Light() :
     _transform() {
     // only if created from nothing shall we create the Buffer to store the properties
     Schema schema;
-    _schemaBuffer = gpu::BufferView(new gpu::Buffer(sizeof(Schema), (const gpu::Buffer::Byte*) &schema));
+    _schemaBuffer = gpu::BufferView(new gpu::Buffer(sizeof(Schema), (const gpu::Byte*) &schema));
 }
 
 Light::Light(const Light& light) :
@@ -44,6 +44,7 @@ void Light::setPosition(const Vec3& position) {
 }
 
 void Light::setOrientation(const glm::quat& orientation) {
+    setDirection(orientation * glm::vec3(0.0f, 0.0f, -1.0f));
     _transform.setRotation(orientation);
 }
 
@@ -61,6 +62,10 @@ void Light::setColor(const Color& color) {
 
 void Light::setIntensity(float intensity) {
     editSchema()._intensity = intensity;
+}
+
+void Light::setAmbientIntensity(float intensity) {
+    editSchema()._ambientIntensity = intensity;
 }
 
 void Light::setMaximumRadius(float radius) {

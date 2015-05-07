@@ -16,11 +16,13 @@
 
 #include <QSet>
 #include <btBulletDynamicsCommon.h>
+#include <BulletCollision/CollisionDispatch/btGhostObject.h>
 
 #include <EntityItem.h>
 #include <EntitySimulation.h>
 
 #include "BulletUtil.h"
+#include "DynamicCharacterController.h"
 #include "ContactInfo.h"
 #include "EntityMotionState.h"
 #include "ShapeManager.h"
@@ -37,8 +39,8 @@ public:
     ContactKey(void* a, void* b) : _a(a), _b(b) {}
     bool operator<(const ContactKey& other) const { return _a < other._a || (_a == other._a && _b < other._b); }
     bool operator==(const ContactKey& other) const { return _a == other._a && _b == other._b; }
-    void* _a;
-    void* _b;
+    void* _a; // EntityMotionState pointer
+    void* _b; // EntityMotionState pointer
 };
 
 typedef std::map<ContactKey, ContactInfo> ContactMap;
@@ -66,8 +68,9 @@ public:
 
     void stepSimulation();
     void stepNonPhysicalKinematics(const quint64& now);
-
     void computeCollisionEvents();
+
+    void dumpStatsIfNecessary();
 
     /// \param offset position of simulation origin in domain-frame
     void setOriginOffset(const glm::vec3& offset) { _originOffset = offset; }
@@ -82,14 +85,22 @@ public:
     /// process queue of changed from external sources
     void relayIncomingChangesToSimulation();
 
+    void setCharacterController(DynamicCharacterController* character);
+
+    void dumpNextStats() { _dumpNextStats = true; }
+
+    void bump(EntityItem* bumpEntity);
+
 private:
     /// \param motionState pointer to Object's MotionState
     void removeObjectFromBullet(ObjectMotionState* motionState);
 
     void removeContacts(ObjectMotionState* motionState);
 
+    void doOwnershipInfection(const btCollisionObject* objectA, const btCollisionObject* objectB);
+
     // return 'true' of update was successful
-    bool updateObjectHard(btRigidBody* body, ObjectMotionState* motionState, uint32_t flags);
+    bool updateBodyHard(btRigidBody* body, ObjectMotionState* motionState, uint32_t flags);
     void updateObjectEasy(btRigidBody* body, ObjectMotionState* motionState, uint32_t flags);
 
     btClock _clock;
@@ -98,6 +109,7 @@ private:
     btBroadphaseInterface* _broadphaseFilter = NULL;
     btSequentialImpulseConstraintSolver* _constraintSolver = NULL;
     ThreadSafeDynamicsWorld* _dynamicsWorld = NULL;
+    btGhostPairCallback* _ghostPairCallback = NULL;
     ShapeManager _shapeManager;
 
     glm::vec3 _originOffset;
@@ -113,6 +125,11 @@ private:
     ContactMap _contactMap;
     uint32_t _numContactFrames = 0;
     uint32_t _lastNumSubstepsAtUpdateInternal = 0;
+
+    /// character collisions
+    DynamicCharacterController* _characterController = NULL;
+
+    bool _dumpNextStats = false;
 };
 
 #endif // hifi_PhysicsEngine_h

@@ -26,12 +26,15 @@
 #include <AccountManager.h>
 #include <HifiConfigVariantMap.h>
 #include <HTTPConnection.h>
+#include <JSONBreakableMarshal.h>
 #include <LogUtils.h>
+#include <NetworkingConstants.h>
 #include <PacketHeaders.h>
 #include <SettingHandle.h>
 #include <SharedUtil.h>
 #include <ShutdownEventListener.h>
 #include <UUID.h>
+#include <LogHandler.h>
 
 #include "DomainServerNodeData.h"
 
@@ -43,7 +46,9 @@ const QString ICE_SERVER_DEFAULT_HOSTNAME = "ice.highfidelity.io";
 
 
 const QString ALLOWED_USERS_SETTINGS_KEYPATH = "security.allowed_users";
+const QString MAXIMUM_USER_CAPACITY = "security.maximum_user_capacity";
 const QString ALLOWED_EDITORS_SETTINGS_KEYPATH = "security.allowed_editors";
+const QString EDITORS_ARE_REZZERS_KEYPATH = "security.editors_are_rezzers";
 
 
 DomainServer::DomainServer(int argc, char* argv[]) :
@@ -179,7 +184,7 @@ bool DomainServer::optionallySetupOAuth() {
     
     // if we don't have an oauth provider URL then we default to the default node auth url
     if (_oauthProviderURL.isEmpty()) {
-        _oauthProviderURL = DEFAULT_NODE_AUTH_URL;
+        _oauthProviderURL = NetworkingConstants::METAVERSE_SERVER_URL;
     }
     
     AccountManager& accountManager = AccountManager::getInstance();
@@ -246,7 +251,14 @@ void DomainServer::setupNodeListAndAssignments(const QUuid& sessionUUID) {
     auto nodeList = DependencyManager::set<LimitedNodeList>(domainServerPort, domainServerDTLSPort);
     
     // no matter the local port, save it to shared mem so that local assignment clients can ask what it is
-    nodeList->putLocalPortIntoSharedMemory(DOMAIN_SERVER_LOCAL_PORT_SMEM_KEY, this);
+    nodeList->putLocalPortIntoSharedMemory(DOMAIN_SERVER_LOCAL_PORT_SMEM_KEY, this, nodeList->getNodeSocket().localPort());
+
+    // store our local http ports in shared memory
+    quint16 localHttpPort = DOMAIN_SERVER_HTTP_PORT;
+    nodeList->putLocalPortIntoSharedMemory(DOMAIN_SERVER_LOCAL_HTTP_PORT_SMEM_KEY, this, localHttpPort);
+    quint16 localHttpsPort = DOMAIN_SERVER_HTTPS_PORT;
+    nodeList->putLocalPortIntoSharedMemory(DOMAIN_SERVER_LOCAL_HTTPS_PORT_SMEM_KEY, this, localHttpsPort);
+
     
     // set our LimitedNodeList UUID to match the UUID from our config
     // nodes will currently use this to add resources to data-web that relate to our domain
@@ -258,10 +270,6 @@ void DomainServer::setupNodeListAndAssignments(const QUuid& sessionUUID) {
 
     connect(nodeList.data(), &LimitedNodeList::nodeAdded, this, &DomainServer::nodeAdded);
     connect(nodeList.data(), &LimitedNodeList::nodeKilled, this, &DomainServer::nodeKilled);
-
-    QTimer* silentNodeTimer = new QTimer(this);
-    connect(silentNodeTimer, SIGNAL(timeout()), nodeList.data(), SLOT(removeSilentNodes()));
-    silentNodeTimer->start(NODE_SILENCE_THRESHOLD_MSECS);
 
     connect(&nodeList->getNodeSocket(), SIGNAL(readyRead()), SLOT(readAvailableDatagrams()));
 
@@ -295,6 +303,9 @@ bool DomainServer::didSetupAccountManagerWithAccessToken() {
                     << "at keypath metaverse.access_token or in your ENV at key DOMAIN_SERVER_ACCESS_TOKEN";
                 return false;
             }
+        } else {
+            qDebug() << "Using access token from DOMAIN_SERVER_ACCESS_TOKEN in env. This overrides any access token present"
+                << " in the user or master config.";
         }
         
         // give this access token to the AccountManager
@@ -494,7 +505,7 @@ void DomainServer::populateStaticScriptedAssignmentsFromSettings() {
                                                                   Assignment::AgentType,
                                                                   scriptPool);
                     scriptAssignment->setPayload(scriptURL.toUtf8());
-                    
+
                     // add it to static hash so we know we have to keep giving it back out
                     addStaticAssignmentToAssignmentHash(scriptAssignment);
                 }
@@ -548,6 +559,7 @@ void DomainServer::populateDefaultStaticAssignmentsExcludingTypes(const QSet<Ass
         if (!excludedTypes.contains(defaultedType) 
             && defaultedType != Assignment::UNUSED_0
             && defaultedType != Assignment::UNUSED_1
+            && defaultedType != Assignment::UNUSED_2
             && defaultedType != Assignment::AgentType) {
             // type has not been set from a command line or config file config, use the default
             // by clearing whatever exists and writing a single default assignment with no payload
@@ -558,8 +570,7 @@ void DomainServer::populateDefaultStaticAssignmentsExcludingTypes(const QSet<Ass
 }
 
 const NodeSet STATICALLY_ASSIGNED_NODES = NodeSet() << NodeType::AudioMixer
-    << NodeType::AvatarMixer << NodeType::EntityServer
-    << NodeType::MetavoxelServer;
+    << NodeType::AvatarMixer << NodeType::EntityServer;
 
 void DomainServer::handleConnectRequest(const QByteArray& packet, const HifiSockAddr& senderSockAddr) {
 
@@ -607,13 +618,15 @@ void DomainServer::handleConnectRequest(const QByteArray& packet, const HifiSock
     QByteArray usernameSignature;
     
     packetStream >> nodeInterestList >> username >> usernameSignature;
-    
-    if (!isAssignment && !shouldAllowConnectionFromNode(username, usernameSignature, senderSockAddr)) {
+
+    QString reason;
+    if (!isAssignment && !shouldAllowConnectionFromNode(username, usernameSignature, senderSockAddr, reason)) {
         // this is an agent and we've decided we won't let them connect - send them a packet to deny connection
-        QByteArray usernameRequestByteArray = byteArrayWithPopulatedHeader(PacketTypeDomainConnectionDenied);
-        
-        // send this oauth request datagram back to the client
-        DependencyManager::get<LimitedNodeList>()->writeUnverifiedDatagram(usernameRequestByteArray, senderSockAddr);
+        QByteArray connectionDeniedByteArray = byteArrayWithPopulatedHeader(PacketTypeDomainConnectionDenied);
+        QDataStream out(&connectionDeniedByteArray, QIODevice::WriteOnly | QIODevice::Append);
+        out << reason;
+        // tell client it has been refused.
+        DependencyManager::get<LimitedNodeList>()->writeUnverifiedDatagram(connectionDeniedByteArray, senderSockAddr);
         
         return;
     }
@@ -638,9 +651,23 @@ void DomainServer::handleConnectRequest(const QByteArray& packet, const HifiSock
         QStringList allowedEditors = allowedEditorsVariant ? allowedEditorsVariant->toStringList() : QStringList();
         bool canAdjustLocks = allowedEditors.isEmpty() || allowedEditors.contains(username);
 
+        const QVariant* editorsAreRezzersVariant =
+            valueForKeyPath(_settingsManager.getSettingsMap(), EDITORS_ARE_REZZERS_KEYPATH);
+        
+        bool onlyEditorsAreRezzers = false;
+        if (editorsAreRezzersVariant) {
+            onlyEditorsAreRezzers = editorsAreRezzersVariant->toBool();
+        }
+
+        bool canRez = true;
+        if (onlyEditorsAreRezzers) {
+            canRez = canAdjustLocks;
+        }
+
         SharedNodePointer newNode =
             DependencyManager::get<LimitedNodeList>()->addOrUpdateNode(nodeUUID, nodeType,
-                                                                       publicSockAddr, localSockAddr, canAdjustLocks);
+                                                                       publicSockAddr, localSockAddr,
+                                                                       canAdjustLocks, canRez);
         // when the newNode is created the linked data is also created
         // if this was a static assignment set the UUID, set the sendingSockAddr
         DomainServerNodeData* nodeData = reinterpret_cast<DomainServerNodeData*>(newNode->getLinkedData());
@@ -649,12 +676,23 @@ void DomainServer::handleConnectRequest(const QByteArray& packet, const HifiSock
             nodeData->setAssignmentUUID(matchingQueuedAssignment->getUUID());
             nodeData->setWalletUUID(pendingAssigneeData->getWalletUUID());
 
+            // always allow assignment clients to create and destroy entities
+            newNode->setCanAdjustLocks(true);
+            newNode->setCanRez(true);
+
             // now that we've pulled the wallet UUID and added the node to our list, delete the pending assignee data
             delete pendingAssigneeData;
         }
+
+        if (!username.isEmpty()) {
+            // if we have a username from the connect request, set it on the DomainServerNodeData
+            nodeData->setUsername(username);
+
+            // also add an interpolation to JSONBreakableMarshal so that servers can get username in stats
+            JSONBreakableMarshal::addInterpolationForKey(USERNAME_UUID_REPLACEMENT_STATS_KEY, 
+                uuidStringWithoutCurlyBraces(nodeUUID), username);
+        }
         
-        // if we have a username from an OAuth connect request, set it on the DomainServerNodeData
-        nodeData->setUsername(username);
         nodeData->setSendingSockAddr(senderSockAddr);
 
         // reply back to the user with a PacketTypeDomainList
@@ -663,9 +701,76 @@ void DomainServer::handleConnectRequest(const QByteArray& packet, const HifiSock
 }
 
 
+unsigned int DomainServer::countConnectedUsers() {
+    unsigned int result = 0;
+    auto nodeList = DependencyManager::get<LimitedNodeList>();
+    nodeList->eachNode([&](const SharedNodePointer& otherNode){
+        if (otherNode->getType() == NodeType::Agent) {
+            result++;
+        }
+    });
+    return result;
+}
+
+
+bool DomainServer::verifyUsersKey (const QString& username,
+                                   const QByteArray& usernameSignature,
+                                   QString& reasonReturn) {
+    // it's possible this user can be allowed to connect, but we need to check their username signature
+            
+    QByteArray publicKeyArray = _userPublicKeys.value(username);
+    if (!publicKeyArray.isEmpty()) {
+        // if we do have a public key for the user, check for a signature match
+                
+        const unsigned char* publicKeyData = reinterpret_cast<const unsigned char*>(publicKeyArray.constData());
+                
+        // first load up the public key into an RSA struct
+        RSA* rsaPublicKey = d2i_RSA_PUBKEY(NULL, &publicKeyData, publicKeyArray.size());
+                
+        if (rsaPublicKey) {
+            QByteArray decryptedArray(RSA_size(rsaPublicKey), 0);
+            int decryptResult =
+                RSA_public_decrypt(usernameSignature.size(),
+                                   reinterpret_cast<const unsigned char*>(usernameSignature.constData()),
+                                   reinterpret_cast<unsigned char*>(decryptedArray.data()),
+                                   rsaPublicKey, RSA_PKCS1_PADDING);
+                    
+            if (decryptResult != -1) {
+                if (username.toLower() == decryptedArray) {
+                    qDebug() << "Username signature matches for" << username << "- allowing connection.";
+                            
+                    // free up the public key before we return
+                    RSA_free(rsaPublicKey);
+                            
+                    return true;
+                } else {
+                    qDebug() << "Username signature did not match for" << username << "- denying connection.";
+                    reasonReturn = "Username signature did not match.";
+                }
+            } else {
+                qDebug() << "Couldn't decrypt user signature for" << username << "- denying connection.";
+                reasonReturn = "Couldn't decrypt user signature.";
+            }
+                    
+            // free up the public key, we don't need it anymore
+            RSA_free(rsaPublicKey);
+        } else {
+            // we can't let this user in since we couldn't convert their public key to an RSA key we could use
+            qDebug() << "Couldn't convert data to RSA key for" << username << "- denying connection.";
+            reasonReturn = "Couldn't convert data to RSA key.";
+        }
+    }
+
+    requestUserPublicKey(username); // no joy.  maybe next time?
+    return false;
+}
+
+
 bool DomainServer::shouldAllowConnectionFromNode(const QString& username,
                                                  const QByteArray& usernameSignature,
-                                                 const HifiSockAddr& senderSockAddr) {
+                                                 const HifiSockAddr& senderSockAddr,
+                                                 QString& reasonReturn) {
+
     const QVariant* allowedUsersVariant = valueForKeyPath(_settingsManager.getSettingsMap(),
                                                                  ALLOWED_USERS_SETTINGS_KEYPATH);
     QStringList allowedUsers = allowedUsersVariant ? allowedUsersVariant->toStringList() : QStringList();
@@ -678,57 +783,43 @@ bool DomainServer::shouldAllowConnectionFromNode(const QString& username,
     
     if (allowedUsers.count() > 0) {
         if (allowedUsers.contains(username, Qt::CaseInsensitive)) {
-            // it's possible this user can be allowed to connect, but we need to check their username signature
-            
-            QByteArray publicKeyArray = _userPublicKeys.value(username);
-            if (!publicKeyArray.isEmpty()) {
-                // if we do have a public key for the user, check for a signature match
-                
-                const unsigned char* publicKeyData = reinterpret_cast<const unsigned char*>(publicKeyArray.constData());
-                
-                // first load up the public key into an RSA struct
-                RSA* rsaPublicKey = d2i_RSA_PUBKEY(NULL, &publicKeyData, publicKeyArray.size());
-                
-                if (rsaPublicKey) {
-                    QByteArray decryptedArray(RSA_size(rsaPublicKey), 0);
-                    int decryptResult = RSA_public_decrypt(usernameSignature.size(),
-                                                           reinterpret_cast<const unsigned char*>(usernameSignature.constData()),
-                                                           reinterpret_cast<unsigned char*>(decryptedArray.data()),
-                                                           rsaPublicKey, RSA_PKCS1_PADDING);
-                    
-                    if (decryptResult != -1) {
-                        if (username.toLower() == decryptedArray) {
-                            qDebug() << "Username signature matches for" << username << "- allowing connection.";
-                            
-                            // free up the public key before we return
-                            RSA_free(rsaPublicKey);
-                            
-                            return true;
-                        } else {
-                            qDebug() << "Username signature did not match for" << username << "- denying connection.";
-                        }
-                    } else {
-                        qDebug() << "Couldn't decrypt user signature for" << username << "- denying connection.";
-                    }
-                    
-                    // free up the public key, we don't need it anymore
-                    RSA_free(rsaPublicKey);
-                } else {
-                    // we can't let this user in since we couldn't convert their public key to an RSA key we could use
-                    qDebug() << "Couldn't convert data to RSA key for" << username << "- denying connection.";
-                }
+            if (verifyUsersKey(username, usernameSignature, reasonReturn)) {
+                return true;
             }
-        
-            requestUserPublicKey(username);
         } else {
             qDebug() << "Connect request denied for user" << username << "not in allowed users list.";
+            reasonReturn = "User not on whitelist.";
         }
+        return false;
     } else {
-        // since we have no allowed user list, let them all in
+        // we have no allowed user list.
+
+        // if this user is in the editors list, exempt them from the max-capacity check
+        const QVariant* allowedEditorsVariant =
+            valueForKeyPath(_settingsManager.getSettingsMap(), ALLOWED_EDITORS_SETTINGS_KEYPATH);
+        QStringList allowedEditors = allowedEditorsVariant ? allowedEditorsVariant->toStringList() : QStringList();
+        if (allowedEditors.contains(username)) {
+            if (verifyUsersKey(username, usernameSignature, reasonReturn)) {
+                return true;
+            }
+        }
+
+        // if we haven't reached max-capacity, let them in.
+        const QVariant* maximumUserCapacityVariant = valueForKeyPath(_settingsManager.getSettingsMap(), MAXIMUM_USER_CAPACITY);
+        unsigned int maximumUserCapacity = maximumUserCapacityVariant ? maximumUserCapacityVariant->toUInt() : 0;
+        if (maximumUserCapacity > 0) {
+            unsigned int connectedUsers = countConnectedUsers();
+            if (connectedUsers >= maximumUserCapacity) {
+                // too many users, deny the new connection.
+                qDebug() << connectedUsers << "/" << maximumUserCapacity << "users connected, denying new connection.";
+                reasonReturn = "Too many connected users.";
+                return false;
+            }
+            qDebug() << connectedUsers << "/" << maximumUserCapacity << "users connected, perhaps allowing new connection.";
+        }
+
         return true;
     }
-    
-    return false;
 }
 
 void DomainServer::preloadAllowedUserPublicKeys() {
@@ -754,8 +845,9 @@ void DomainServer::requestUserPublicKey(const QString& username) {
     
     qDebug() << "Requesting public key for user" << username;
     
-    AccountManager::getInstance().unauthenticatedRequest(USER_PUBLIC_KEY_PATH.arg(username),
-                                                         QNetworkAccessManager::GetOperation, callbackParams);
+    AccountManager::getInstance().sendRequest(USER_PUBLIC_KEY_PATH.arg(username),
+                                              AccountManagerAuth::None,
+                                              QNetworkAccessManager::GetOperation, callbackParams);
 }
 
 QUrl DomainServer::oauthRedirectURL() {
@@ -841,6 +933,7 @@ void DomainServer::sendDomainListToNode(const SharedNodePointer& node, const Hif
     QDataStream broadcastDataStream(&broadcastPacket, QIODevice::Append);
     broadcastDataStream << node->getUUID();
     broadcastDataStream << node->getCanAdjustLocks();
+    broadcastDataStream << node->getCanRez();
 
     int numBroadcastPacketLeadBytes = broadcastDataStream.device()->pos();
 
@@ -943,8 +1036,10 @@ void DomainServer::readAvailableDatagrams() {
 
             if (requestAssignment.getType() != Assignment::AgentType
                 || noisyMessageTimer.elapsed() > NOISY_MESSAGE_INTERVAL_MSECS) {
+                static QString repeatedMessage = LogHandler::getInstance().addOnlyOnceMessageRegex
+                    ("Received a request for assignment type [^ ]+ from [^ ]+");
                 qDebug() << "Received a request for assignment type" << requestAssignment.getType()
-                    << "from" << senderSockAddr;
+                         << "from" << senderSockAddr;
                 noisyMessageTimer.restart();
             }
 
@@ -974,6 +1069,8 @@ void DomainServer::readAvailableDatagrams() {
             } else {
                 if (requestAssignment.getType() != Assignment::AgentType
                     || noisyMessageTimer.elapsed() > NOISY_MESSAGE_INTERVAL_MSECS) {
+                    static QString repeatedMessage = LogHandler::getInstance().addOnlyOnceMessageRegex
+                        ("Unable to fulfill assignment request of type [^ ]+ from [^ ]+");
                     qDebug() << "Unable to fulfill assignment request of type" << requestAssignment.getType()
                         << "from" << senderSockAddr;
                     noisyMessageTimer.restart();
@@ -1052,8 +1149,10 @@ void DomainServer::sendPendingTransactionsToServer() {
         transactionCallbackParams.jsonCallbackMethod = "transactionJSONCallback";
 
         while (i != _pendingAssignmentCredits.end()) {
-            accountManager.authenticatedRequest("api/v1/transactions", QNetworkAccessManager::PostOperation,
-                                                transactionCallbackParams, i.value()->postJson().toJson());
+            accountManager.sendRequest("api/v1/transactions",
+                                       AccountManagerAuth::Required,
+                                       QNetworkAccessManager::PostOperation,
+                                       transactionCallbackParams, i.value()->postJson().toJson());
 
             // set this transaction to finalized so we don't add additional credits to it
             i.value()->setIsFinalized(true);
@@ -1176,10 +1275,11 @@ void DomainServer::sendHeartbeatToDataServer(const QString& networkAddress) {
     
     QString domainUpdateJSON = QString("{\"domain\": %1 }").arg(QString(QJsonDocument(domainObject).toJson()));
     
-    AccountManager::getInstance().authenticatedRequest(DOMAIN_UPDATE.arg(uuidStringWithoutCurlyBraces(domainID)),
-                                                       QNetworkAccessManager::PutOperation,
-                                                       JSONCallbackParameters(),
-                                                       domainUpdateJSON.toUtf8());
+    AccountManager::getInstance().sendRequest(DOMAIN_UPDATE.arg(uuidStringWithoutCurlyBraces(domainID)),
+                                              AccountManagerAuth::Required,
+                                              QNetworkAccessManager::PutOperation,
+                                              JSONCallbackParameters(),
+                                              domainUpdateJSON.toUtf8());
 }
 
 // todo: have data-web respond with ice-server hostname to use
@@ -1994,6 +2094,10 @@ void DomainServer::nodeKilled(SharedNodePointer node) {
             }
         }
 
+        // If this node was an Agent ask JSONBreakableMarshal to potentially remove the interpolation we stored
+        JSONBreakableMarshal::removeInterpolationForKey(USERNAME_UUID_REPLACEMENT_STATS_KEY, 
+                uuidStringWithoutCurlyBraces(node->getUUID()));
+
         // cleanup the connection secrets that we set up for this node (on the other nodes)
         foreach (const QUuid& otherNodeSessionUUID, nodeData->getSessionSecretHash().keys()) {
             SharedNodePointer otherNode = DependencyManager::get<LimitedNodeList>()->nodeWithUUID(otherNodeSessionUUID);
@@ -2031,10 +2135,10 @@ SharedAssignmentPointer DomainServer::deployableAssignmentForRequest(const Assig
         Assignment* assignment = sharedAssignment->data();
         bool requestIsAllTypes = requestAssignment.getType() == Assignment::AllTypes;
         bool assignmentTypesMatch = assignment->getType() == requestAssignment.getType();
-        bool nietherHasPool = assignment->getPool().isEmpty() && requestAssignment.getPool().isEmpty();
+        bool neitherHasPool = assignment->getPool().isEmpty() && requestAssignment.getPool().isEmpty();
         bool assignmentPoolsMatch = assignment->getPool() == requestAssignment.getPool();
 
-        if ((requestIsAllTypes || assignmentTypesMatch) && (nietherHasPool || assignmentPoolsMatch)) {
+        if ((requestIsAllTypes || assignmentTypesMatch) && (neitherHasPool || assignmentPoolsMatch)) {
 
             // remove the assignment from the queue
             SharedAssignmentPointer deployableAssignment = _unfulfilledAssignments.takeAt(sharedAssignment

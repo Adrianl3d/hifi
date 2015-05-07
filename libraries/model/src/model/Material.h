@@ -19,12 +19,35 @@
 #include "gpu/Resource.h"
 #include "gpu/Texture.h"
 
+#include <qurl.h>
+
 namespace model {
-typedef gpu::BufferView UniformBufferView;
-typedef gpu::TextureView TextureView;
+
+typedef glm::vec3 Color;
+
+// TextureStorage is a specialized version of the gpu::Texture::Storage
+// It adds the URL and the notion that it owns the gpu::Texture
+class TextureStorage : public gpu::Texture::Storage {
+public:
+    TextureStorage(const QUrl& url);
+    ~TextureStorage();
+
+    const QUrl& getUrl() const { return _url; }
+    const gpu::TexturePointer& getGPUTexture() const { return _gpuTexture; }
+
+protected:
+    gpu::TexturePointer _gpuTexture;
+    QUrl _url;
+    void init();
+};
+typedef std::shared_ptr< TextureStorage > TextureStoragePointer;
+
+
 
 class Material {
 public:
+    typedef gpu::BufferView UniformBufferView;
+    typedef gpu::TextureView TextureView;
 
     typedef glm::vec3 Color;
 
@@ -79,20 +102,15 @@ public:
     class Schema {
     public:
         
-        Color _diffuse;
-        float _opacity;
-        Color _specular;
-        float _shininess;
-        Color _emissive;
-        float _spare0;
+        Color _diffuse{0.5f};
+        float _opacity{1.f};
+        Color _specular{0.03f};
+        float _shininess{0.1f};
+        Color _emissive{0.0f};
+        float _spare0{0.0f};
+        glm::vec4  _spareVec4{0.0f}; // for alignment beauty, Material size == Mat4x4
 
-        Schema() :
-            _diffuse(0.5f),
-            _opacity(1.0f),
-            _specular(0.03f),
-            _shininess(0.1f),
-            _emissive(0.0f)
-            {}
+        Schema() {}
     };
 
     const UniformBufferView& getSchemaBuffer() const { return _schemaBuffer; }
@@ -107,7 +125,7 @@ protected:
     TextureMap _textureMap;
 
 };
-typedef QSharedPointer< Material > MaterialPointer;
+typedef std::shared_ptr< Material > MaterialPointer;
 
 };
 

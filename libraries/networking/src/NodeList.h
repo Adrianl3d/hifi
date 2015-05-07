@@ -37,6 +37,7 @@ const quint64 DOMAIN_SERVER_CHECK_IN_MSECS = 1 * 1000;
 
 const int MAX_SILENT_DOMAIN_SERVER_CHECK_INS = 5;
 
+class Application;
 class Assignment;
 
 class NodeList : public LimitedNodeList {
@@ -47,7 +48,7 @@ public:
     NodeType_t getOwnerType() const { return _ownerType; }
     void setOwnerType(NodeType_t ownerType) { _ownerType = ownerType; }
 
-    qint64 sendStats(const QJsonObject& statsObject, HifiSockAddr destination);
+    qint64 sendStats(const QJsonObject& statsObject, const HifiSockAddr& destination);
     qint64 sendStatsToDomainServer(const QJsonObject& statsObject);
 
     int getNumNoReplyDomainCheckIns() const { return _numNoReplyDomainCheckIns; }
@@ -80,7 +81,7 @@ private:
     
     void sendSTUNRequest();
     bool processSTUNResponse(const QByteArray& packet);
-    
+
     void handleICEConnectionToDomainServer();
     
     void processDomainServerAuthRequest(const QByteArray& packet);
@@ -95,6 +96,8 @@ private:
     HifiSockAddr _assignmentServerSocket;
     bool _hasCompletedInitialSTUNFailure;
     unsigned int _stunRequestsSinceSuccess;
+    
+    friend class Application;
 };
 
 #endif // hifi_NodeList_h

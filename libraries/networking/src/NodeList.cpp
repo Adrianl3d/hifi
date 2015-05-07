@@ -21,10 +21,12 @@
 #include "AddressManager.h"
 #include "Assignment.h"
 #include "HifiSockAddr.h"
+#include "JSONBreakableMarshal.h"
 #include "NodeList.h"
 #include "PacketHeaders.h"
 #include "SharedUtil.h"
 #include "UUID.h"
+#include "NetworkLogging.h"
 
 NodeList::NodeList(char newOwnerType, unsigned short socketListenPort, unsigned short dtlsListenPort) :
     LimitedNodeList(socketListenPort, dtlsListenPort),
@@ -57,18 +59,52 @@ NodeList::NodeList(char newOwnerType, unsigned short socketListenPort, unsigned 
     
     // handle ICE signal from DS so connection is attempted immediately
     connect(&_domainHandler, &DomainHandler::requestICEConnectionAttempt, this, &NodeList::handleICEConnectionToDomainServer);
+
+    // clear out NodeList when login is finished
+    connect(&AccountManager::getInstance(), &AccountManager::loginComplete , this, &NodeList::reset);
     
     // clear our NodeList when logout is requested
     connect(&AccountManager::getInstance(), &AccountManager::logoutComplete , this, &NodeList::reset);
 }
 
-qint64 NodeList::sendStats(const QJsonObject& statsObject, HifiSockAddr destination) {
-    QByteArray statsPacket = byteArrayWithPopulatedHeader(PacketTypeNodeJsonStats);
-    QDataStream statsPacketStream(&statsPacket, QIODevice::Append);
+qint64 NodeList::sendStats(const QJsonObject& statsObject, const HifiSockAddr& destination) {
+    QByteArray statsPacket(MAX_PACKET_SIZE, 0);
+    int numBytesForPacketHeader = populatePacketHeader(statsPacket, PacketTypeNodeJsonStats);
+
+    // get a QStringList using JSONBreakableMarshal
+    QStringList statsStringList = JSONBreakableMarshal::toStringList(statsObject, "");
+
+    int numBytesWritten = numBytesForPacketHeader;
     
-    statsPacketStream << statsObject.toVariantMap();
+    // enumerate the resulting strings - pack them and send off packets once we hit MTU size 
+    foreach(const QString& statsItem, statsStringList) {
+        QByteArray utf8String = statsItem.toUtf8();
+        utf8String.append('\0');
+
+        if (numBytesWritten + utf8String.size() > MAX_PACKET_SIZE) {
+            // send off the current packet since the next string will make us too big
+            statsPacket.resize(numBytesWritten);
+            writeUnverifiedDatagram(statsPacket, destination);
+           
+            // reset the number of bytes written to the size of our packet header
+            numBytesWritten = numBytesForPacketHeader;
+        }
+        
+        // write this string into the stats packet
+        statsPacket.replace(numBytesWritten, utf8String.size(), utf8String);
+        
+        // keep track of the number of bytes we have written
+        numBytesWritten += utf8String.size();
+    }
+
+    if (numBytesWritten > numBytesForPacketHeader) {
+        // always send the last packet, if it has data
+        statsPacket.resize(numBytesWritten);
+        writeUnverifiedDatagram(statsPacket, destination);
+    }
     
-    return writeUnverifiedDatagram(statsPacket, destination);
+    // enumerate the resulting strings, breaking them into MTU sized packets
+    return 0;
 }
 
 qint64 NodeList::sendStatsToDomainServer(const QJsonObject& statsObject) {
@@ -99,7 +135,7 @@ void NodeList::timePingReply(const QByteArray& packet, const SharedNodePointer& 
     const bool wantDebug = false;
     
     if (wantDebug) {
-        qDebug() << "PING_REPLY from node " << *sendingNode << "\n" <<
+        qCDebug(networking) << "PING_REPLY from node " << *sendingNode << "\n" <<
         "                     now: " << now << "\n" <<
         "                 ourTime: " << ourOriginalTime << "\n" <<
         "                pingTime: " << pingTime << "\n" <<
@@ -167,17 +203,17 @@ void NodeList::processNodeData(const HifiSockAddr& senderSockAddr, const QByteAr
             break;
         }
         case PacketTypeUnverifiedPingReply: {
-            qDebug() << "Received reply from domain-server on" << senderSockAddr;
+            qCDebug(networking) << "Received reply from domain-server on" << senderSockAddr;
             
             // for now we're unsafely assuming this came back from the domain
             if (senderSockAddr == _domainHandler.getICEPeer().getLocalSocket()) {
-                qDebug() << "Connecting to domain using local socket";
+                qCDebug(networking) << "Connecting to domain using local socket";
                 _domainHandler.activateICELocalSocket();
             } else if (senderSockAddr == _domainHandler.getICEPeer().getPublicSocket()) {
-                qDebug() << "Conecting to domain using public socket";
+                qCDebug(networking) << "Conecting to domain using public socket";
                 _domainHandler.activateICEPublicSocket();
             } else {
-                qDebug() << "Reply does not match either local or public socket for domain. Will not connect.";
+                qCDebug(networking) << "Reply does not match either local or public socket for domain. Will not connect.";
             }
         }
         case PacketTypeStunResponse: {
@@ -225,7 +261,7 @@ const unsigned int NUM_STUN_REQUESTS_BEFORE_FALLBACK = 5;
 void NodeList::sendSTUNRequest() {
 
     if (!_hasCompletedInitialSTUNFailure) {
-        qDebug() << "Sending intial stun request to" << STUN_SERVER_HOSTNAME;
+        qCDebug(networking) << "Sending intial stun request to" << STUN_SERVER_HOSTNAME;
     }
     
     LimitedNodeList::sendSTUNRequest();
@@ -236,7 +272,7 @@ void NodeList::sendSTUNRequest() {
         if (!_hasCompletedInitialSTUNFailure) {
             // if we're here this was the last failed STUN request
             // use our DS as our stun server
-            qDebug("Failed to lookup public address via STUN server at %s:%hu. Using DS for STUN.",
+            qCDebug(networking, "Failed to lookup public address via STUN server at %s:%hu. Using DS for STUN.",
                    STUN_SERVER_HOSTNAME, STUN_SERVER_PORT);
 
             _hasCompletedInitialSTUNFailure = true;
@@ -276,7 +312,24 @@ void NodeList::sendDomainServerCheckIn() {
             ? PacketTypeDomainConnectRequest : PacketTypeDomainListRequest;
         
         if (!_domainHandler.isConnected()) {
-            qDebug() << "Sending connect request to domain-server at" << _domainHandler.getHostname();
+            qCDebug(networking) << "Sending connect request to domain-server at" << _domainHandler.getHostname();
+            
+            // is this our localhost domain-server?
+            // if so we need to make sure we have an up-to-date local port in case it restarted
+            
+            if (_domainHandler.getSockAddr().getAddress() == QHostAddress::LocalHost
+                || _domainHandler.getHostname() == "localhost") {
+                
+                static QSharedMemory* localDSPortSharedMem = NULL;
+                
+                quint16 domainPort = DEFAULT_DOMAIN_SERVER_PORT;
+                getLocalServerPortFromSharedMemory(DOMAIN_SERVER_LOCAL_PORT_SMEM_KEY,
+                                                   localDSPortSharedMem,
+                                                   domainPort);
+                qCDebug(networking) << "Local domain-server port read from shared memory (or default) is" << domainPort;
+                _domainHandler.setPort(domainPort);
+            }
+            
         }
         
         // construct the DS check in packet
@@ -310,7 +363,7 @@ void NodeList::sendDomainServerCheckIn() {
             const QByteArray& usernameSignature = AccountManager::getInstance().getAccountInfo().getUsernameSignature();
             
             if (!usernameSignature.isEmpty()) {
-                qDebug() << "Including username signature in domain connect request.";
+                qCDebug(networking) << "Including username signature in domain connect request.";
                 packetStream << usernameSignature;
             }
         }
@@ -348,7 +401,7 @@ void NodeList::handleICEConnectionToDomainServer() {
                                                   _domainHandler.getICEClientID(),
                                                   _domainHandler.getICEDomainID());
     } else {
-        qDebug() << "Sending ping packets to establish connectivity with domain-server with ID"
+        qCDebug(networking) << "Sending ping packets to establish connectivity with domain-server with ID"
             << uuidStringWithoutCurlyBraces(_domainHandler.getICEDomainID());
         
         // send the ping packet to the local and public sockets for this node
@@ -386,6 +439,10 @@ int NodeList::processDomainServerList(const QByteArray& packet) {
     bool thisNodeCanAdjustLocks;
     packetStream >> thisNodeCanAdjustLocks;
     setThisNodeCanAdjustLocks(thisNodeCanAdjustLocks);
+
+    bool thisNodeCanRez;
+    packetStream >> thisNodeCanRez;
+    setThisNodeCanRez(thisNodeCanRez);
     
     // pull each node in the packet
     while(packetStream.device()->pos() < packet.size()) {
@@ -394,8 +451,9 @@ int NodeList::processDomainServerList(const QByteArray& packet) {
         QUuid nodeUUID, connectionUUID;
         HifiSockAddr nodePublicSocket, nodeLocalSocket;
         bool canAdjustLocks;
+        bool canRez;
 
-        packetStream >> nodeType >> nodeUUID >> nodePublicSocket >> nodeLocalSocket >> canAdjustLocks;
+        packetStream >> nodeType >> nodeUUID >> nodePublicSocket >> nodeLocalSocket >> canAdjustLocks >> canRez;
 
         // if the public socket address is 0 then it's reachable at the same IP
         // as the domain server
@@ -403,7 +461,8 @@ int NodeList::processDomainServerList(const QByteArray& packet) {
             nodePublicSocket.setAddress(_domainHandler.getIP());
         }
 
-        SharedNodePointer node = addOrUpdateNode(nodeUUID, nodeType, nodePublicSocket, nodeLocalSocket, canAdjustLocks);
+        SharedNodePointer node = addOrUpdateNode(nodeUUID, nodeType, nodePublicSocket,
+                                                 nodeLocalSocket, canAdjustLocks, canRez);
         
         packetStream >> connectionUUID;
         node->setConnectionSecret(connectionUUID);

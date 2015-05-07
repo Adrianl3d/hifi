@@ -16,6 +16,7 @@
 
 #include "Node.h"
 #include "SharedUtil.h"
+#include "NetworkLogging.h"
 
 #include <QtCore/QDataStream>
 #include <QtCore/QDebug>
@@ -29,7 +30,6 @@ namespace NodeType {
 void NodeType::init() {
     TypeNameHash.insert(NodeType::DomainServer, "Domain Server");
     TypeNameHash.insert(NodeType::EntityServer, "Entity Server");
-    TypeNameHash.insert(NodeType::MetavoxelServer, "Metavoxel Server");
     TypeNameHash.insert(NodeType::Agent, "Agent");
     TypeNameHash.insert(NodeType::AudioMixer, "Audio Mixer");
     TypeNameHash.insert(NodeType::AvatarMixer, "Avatar Mixer");
@@ -42,7 +42,7 @@ const QString& NodeType::getNodeTypeName(NodeType_t nodeType) {
 }
 
 Node::Node(const QUuid& uuid, NodeType_t type, const HifiSockAddr& publicSocket,
-           const HifiSockAddr& localSocket, bool canAdjustLocks) :
+           const HifiSockAddr& localSocket, bool canAdjustLocks, bool canRez) :
     NetworkPeer(uuid, publicSocket, localSocket),
     _type(type),
     _activeSocket(NULL),
@@ -54,7 +54,8 @@ Node::Node(const QUuid& uuid, NodeType_t type, const HifiSockAddr& publicSocket,
     _clockSkewUsec(0),
     _mutex(),
     _clockSkewMovingPercentile(30, 0.8f),   // moving 80th percentile of 30 samples
-    _canAdjustLocks(canAdjustLocks)
+    _canAdjustLocks(canAdjustLocks),
+    _canRez(canRez)
 {
     
 }
@@ -76,7 +77,7 @@ void Node::setPublicSocket(const HifiSockAddr& publicSocket) {
         }
         
         if (!_publicSocket.isNull()) {
-            qDebug() << "Public socket change for node" << *this;
+            qCDebug(networking) << "Public socket change for node" << *this;
         }
         
         _publicSocket = publicSocket;
@@ -91,7 +92,7 @@ void Node::setLocalSocket(const HifiSockAddr& localSocket) {
         }
         
         if (!_localSocket.isNull()) {
-            qDebug() << "Local socket change for node" << *this;
+            qCDebug(networking) << "Local socket change for node" << *this;
         }
         
         _localSocket = localSocket;
@@ -106,7 +107,7 @@ void Node::setSymmetricSocket(const HifiSockAddr& symmetricSocket) {
         }
         
         if (!_symmetricSocket.isNull()) {
-            qDebug() << "Symmetric socket change for node" << *this;
+            qCDebug(networking) << "Symmetric socket change for node" << *this;
         }
         
         _symmetricSocket = symmetricSocket;
@@ -114,17 +115,17 @@ void Node::setSymmetricSocket(const HifiSockAddr& symmetricSocket) {
 }
 
 void Node::activateLocalSocket() {
-    qDebug() << "Activating local socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
+    qCDebug(networking) << "Activating local socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
     _activeSocket = &_localSocket;
 }
 
 void Node::activatePublicSocket() {
-    qDebug() << "Activating public socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
+    qCDebug(networking) << "Activating public socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
     _activeSocket = &_publicSocket;
 }
 
 void Node::activateSymmetricSocket() {
-    qDebug() << "Activating symmetric socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
+    qCDebug(networking) << "Activating symmetric socket for network peer with ID" << uuidStringWithoutCurlyBraces(_uuid);
     _activeSocket = &_symmetricSocket;
 }
 
@@ -134,6 +135,7 @@ QDataStream& operator<<(QDataStream& out, const Node& node) {
     out << node._publicSocket;
     out << node._localSocket;
     out << node._canAdjustLocks;
+    out << node._canRez;
     
     return out;
 }
@@ -144,6 +146,7 @@ QDataStream& operator>>(QDataStream& in, Node& node) {
     in >> node._publicSocket;
     in >> node._localSocket;
     in >> node._canAdjustLocks;
+    in >> node._canRez;
     
     return in;
 }

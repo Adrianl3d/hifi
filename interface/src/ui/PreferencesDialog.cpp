@@ -16,15 +16,18 @@
 #include <avatar/AvatarManager.h>
 #include <devices/Faceshift.h>
 #include <devices/SixenseManager.h>
+#include <NetworkingConstants.h>
 
 #include "Application.h"
+#include "DialogsManager.h"
 #include "MainWindow.h"
+#include "LODManager.h"
 #include "Menu.h"
-#include "ModelsBrowser.h"
 #include "PreferencesDialog.h"
 #include "Snapshot.h"
 #include "UserActivityLogger.h"
 #include "UIUtil.h"
+
 
 const int PREFERENCES_HEIGHT_PADDING = 20;
 
@@ -39,42 +42,47 @@ PreferencesDialog::PreferencesDialog(QWidget* parent) :
     ui.outputBufferSizeSpinner->setMinimum(MIN_AUDIO_OUTPUT_BUFFER_SIZE_FRAMES);
     ui.outputBufferSizeSpinner->setMaximum(MAX_AUDIO_OUTPUT_BUFFER_SIZE_FRAMES);
 
-    connect(ui.buttonBrowseHead, &QPushButton::clicked, this, &PreferencesDialog::openHeadModelBrowser);
-    connect(ui.buttonBrowseBody, &QPushButton::clicked, this, &PreferencesDialog::openBodyModelBrowser);
     connect(ui.buttonBrowseLocation, &QPushButton::clicked, this, &PreferencesDialog::openSnapshotLocationBrowser);
     connect(ui.buttonBrowseScriptsLocation, &QPushButton::clicked, this, &PreferencesDialog::openScriptsLocationBrowser);
-    connect(ui.buttonReloadDefaultScripts, &QPushButton::clicked,
-            Application::getInstance(), &Application::loadDefaultScripts);
+    connect(ui.buttonReloadDefaultScripts, &QPushButton::clicked, Application::getInstance(), &Application::loadDefaultScripts);
+
+    DialogsManager* dialogsManager = DependencyManager::get<DialogsManager>().data();
+    connect(ui.buttonChangeApperance, &QPushButton::clicked, dialogsManager, &DialogsManager::changeAvatarAppearance);
+
+    connect(Application::getInstance(), &Application::headURLChanged, this, &PreferencesDialog::headURLChanged);
+    connect(Application::getInstance(), &Application::bodyURLChanged, this, &PreferencesDialog::bodyURLChanged);
+    connect(Application::getInstance(), &Application::fullAvatarURLChanged, this, &PreferencesDialog::fullAvatarURLChanged);
+
     // move dialog to left side
     move(parentWidget()->geometry().topLeft());
     setFixedHeight(parentWidget()->size().height() - PREFERENCES_HEIGHT_PADDING);
 
+    ui.apperanceDescription->setText(DependencyManager::get<AvatarManager>()->getMyAvatar()->getModelDescription());
+
     UIUtil::scaleWidgetFontSizes(this);
+}
+
+void PreferencesDialog::avatarDescriptionChanged() {
+    ui.apperanceDescription->setText(DependencyManager::get<AvatarManager>()->getMyAvatar()->getModelDescription());
+}
+
+void PreferencesDialog::headURLChanged(const QString& newValue, const QString& modelName) {
+    ui.apperanceDescription->setText(DependencyManager::get<AvatarManager>()->getMyAvatar()->getModelDescription());
+}
+
+void PreferencesDialog::bodyURLChanged(const QString& newValue, const QString& modelName) {
+    ui.apperanceDescription->setText(DependencyManager::get<AvatarManager>()->getMyAvatar()->getModelDescription());
+}
+
+void PreferencesDialog::fullAvatarURLChanged(const QString& newValue, const QString& modelName) {
+    ui.apperanceDescription->setText(DependencyManager::get<AvatarManager>()->getMyAvatar()->getModelDescription());
 }
 
 void PreferencesDialog::accept() {
     savePreferences();
     close();
-}
-
-void PreferencesDialog::setHeadUrl(QString modelUrl) {
-    ui.faceURLEdit->setText(modelUrl);
-}
-
-void PreferencesDialog::setSkeletonUrl(QString modelUrl) {
-    ui.skeletonURLEdit->setText(modelUrl);
-}
-
-void PreferencesDialog::openHeadModelBrowser() {
-    ModelsBrowser modelBrowser(HEAD_MODEL);
-    connect(&modelBrowser, &ModelsBrowser::selected, this, &PreferencesDialog::setHeadUrl);
-    modelBrowser.browse();
-}
-
-void PreferencesDialog::openBodyModelBrowser() {
-    ModelsBrowser modelBrowser(SKELETON_MODEL);
-    connect(&modelBrowser, &ModelsBrowser::selected, this, &PreferencesDialog::setSkeletonUrl);
-    modelBrowser.browse();
+    delete _marketplaceWindow;
+    _marketplaceWindow = NULL;
 }
 
 void PreferencesDialog::openSnapshotLocationBrowser() {
@@ -118,12 +126,6 @@ void PreferencesDialog::loadPreferences() {
     _displayNameString = myAvatar->getDisplayName();
     ui.displayNameEdit->setText(_displayNameString);
 
-    _faceURLString = myAvatar->getHead()->getFaceModel().getURL().toString();
-    ui.faceURLEdit->setText(_faceURLString);
-
-    _skeletonURLString = myAvatar->getSkeletonModel().getURL().toString();
-    ui.skeletonURLEdit->setText(_skeletonURLString);
-    
     ui.sendDataCheckBox->setChecked(!menuInstance->isOptionChecked(MenuOption::DisableActivityLogger));
 
     ui.snapshotLocationEdit->setText(Snapshot::snapshotsLocation.get());
@@ -168,17 +170,22 @@ void PreferencesDialog::loadPreferences() {
     
     ui.maxOctreePPSSpin->setValue(qApp->getOctreeQuery().getMaxOctreePacketsPerSecond());
 
-    ui.oculusUIAngularSizeSpin->setValue(qApp->getApplicationOverlay().getOculusUIAngularSize());
+    ui.oculusUIAngularSizeSpin->setValue(qApp->getApplicationOverlay().getHmdUIAngularSize());
 
     SixenseManager& sixense = SixenseManager::getInstance();
     ui.sixenseReticleMoveSpeedSpin->setValue(sixense.getReticleMoveSpeed());
     ui.invertSixenseButtonsCheckBox->setChecked(sixense.getInvertButtons());
 
+    // LOD items
+    auto lodManager = DependencyManager::get<LODManager>();
+    ui.desktopMinimumFPSSpin->setValue(lodManager->getDesktopLODDecreaseFPS());
+    ui.hmdMinimumFPSSpin->setValue(lodManager->getHMDLODDecreaseFPS());
 }
 
 void PreferencesDialog::savePreferences() {
     
     MyAvatar* myAvatar = DependencyManager::get<AvatarManager>()->getMyAvatar();
+
     bool shouldDispatchIdentityPacket = false;
     
     QString displayNameStr(ui.displayNameEdit->text());
@@ -187,33 +194,7 @@ void PreferencesDialog::savePreferences() {
         UserActivityLogger::getInstance().changedDisplayName(displayNameStr);
         shouldDispatchIdentityPacket = true;
     }
-    
-    QUrl faceModelURL(ui.faceURLEdit->text());
-    QString faceModelURLString = faceModelURL.toString();
-    if (faceModelURLString != _faceURLString) {
-        if (faceModelURLString.isEmpty() || faceModelURLString.toLower().endsWith(".fst")) {
-            // change the faceModelURL in the profile, it will also update this user's BlendFace
-            myAvatar->setFaceModelURL(faceModelURL);
-            UserActivityLogger::getInstance().changedModel("head", faceModelURLString);
-            shouldDispatchIdentityPacket = true;
-        } else {
-            qDebug() << "ERROR: Head model not FST or blank - " << faceModelURLString;
-        }
-    }
 
-    QUrl skeletonModelURL(ui.skeletonURLEdit->text());
-    QString skeletonModelURLString = skeletonModelURL.toString();
-    if (skeletonModelURLString != _skeletonURLString) {
-        if (skeletonModelURLString.isEmpty() || skeletonModelURLString.toLower().endsWith(".fst")) {
-            // change the skeletonModelURL in the profile, it will also update this user's Body
-            myAvatar->setSkeletonModelURL(skeletonModelURL);
-            UserActivityLogger::getInstance().changedModel("skeleton", skeletonModelURLString);
-            shouldDispatchIdentityPacket = true;
-        } else {
-            qDebug() << "ERROR: Skeleton model not FST or blank - " << skeletonModelURLString;
-        }
-    }
-    
     if (shouldDispatchIdentityPacket) {
         myAvatar->sendIdentityPacket();
     }
@@ -235,8 +216,7 @@ void PreferencesDialog::savePreferences() {
     myAvatar->setLeanScale(ui.leanScaleSpin->value());
     myAvatar->setClampedTargetScale(ui.avatarScaleSpin->value());
     
-    auto glCanvas = Application::getInstance()->getGLWidget();
-    Application::getInstance()->resizeGL(glCanvas->width(), glCanvas->height());
+    Application::getInstance()->resizeGL();
 
     DependencyManager::get<AvatarManager>()->getMyAvatar()->setRealWorldFieldOfView(ui.realWorldFieldOfViewSpin->value());
     
@@ -250,7 +230,7 @@ void PreferencesDialog::savePreferences() {
     
     qApp->getOctreeQuery().setMaxOctreePacketsPerSecond(ui.maxOctreePPSSpin->value());
 
-    qApp->getApplicationOverlay().setOculusUIAngularSize(ui.oculusUIAngularSizeSpin->value());
+    qApp->getApplicationOverlay().setHmdUIAngularSize(ui.oculusUIAngularSizeSpin->value());
     
     SixenseManager& sixense = SixenseManager::getInstance();
     sixense.setReticleMoveSpeed(ui.sixenseReticleMoveSpeedSpin->value());
@@ -274,5 +254,10 @@ void PreferencesDialog::savePreferences() {
     audio->setOutputStarveDetectionThreshold(ui.outputStarveDetectionThresholdSpinner->value());
     audio->setOutputStarveDetectionPeriod(ui.outputStarveDetectionPeriodSpinner->value());
 
-    Application::getInstance()->resizeGL(glCanvas->width(), glCanvas->height());
+    Application::getInstance()->resizeGL();
+
+    // LOD items
+    auto lodManager = DependencyManager::get<LODManager>();
+    lodManager->setDesktopLODDecreaseFPS(ui.desktopMinimumFPSSpin->value());
+    lodManager->setHMDLODDecreaseFPS(ui.hmdMinimumFPSSpin->value());
 }

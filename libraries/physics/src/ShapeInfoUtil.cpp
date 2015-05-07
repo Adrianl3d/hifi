@@ -14,60 +14,6 @@
 #include "ShapeInfoUtil.h"
 #include "BulletUtil.h"
 
-int ShapeInfoUtil::toBulletShapeType(int shapeInfoType) {
-    int bulletShapeType = INVALID_SHAPE_PROXYTYPE;
-    switch(shapeInfoType) {
-        case SHAPE_TYPE_BOX:
-            bulletShapeType = BOX_SHAPE_PROXYTYPE;
-            break;
-        case SHAPE_TYPE_SPHERE:
-            bulletShapeType = SPHERE_SHAPE_PROXYTYPE;
-            break;
-        case SHAPE_TYPE_CAPSULE_Y:
-            bulletShapeType = CAPSULE_SHAPE_PROXYTYPE;
-            break;
-    }
-    return bulletShapeType;
-}
-
-int ShapeInfoUtil::fromBulletShapeType(int bulletShapeType) {
-    int shapeInfoType = SHAPE_TYPE_NONE;
-    switch(bulletShapeType) {
-        case BOX_SHAPE_PROXYTYPE:
-            shapeInfoType = SHAPE_TYPE_BOX;
-            break;
-        case SPHERE_SHAPE_PROXYTYPE:
-            shapeInfoType = SHAPE_TYPE_SPHERE;
-            break;
-        case CAPSULE_SHAPE_PROXYTYPE:
-            shapeInfoType = SHAPE_TYPE_CAPSULE_Y;
-            break;
-    }
-    return shapeInfoType;
-}
-
-void ShapeInfoUtil::collectInfoFromShape(const btCollisionShape* shape, ShapeInfo& info) {
-    if (shape) {
-        int type = ShapeInfoUtil::fromBulletShapeType(shape->getShapeType());
-        switch(type) {
-            case SHAPE_TYPE_BOX: {
-                const btBoxShape* boxShape = static_cast<const btBoxShape*>(shape);
-                info.setBox(bulletToGLM(boxShape->getHalfExtentsWithMargin()));
-            }
-            break;
-            case SHAPE_TYPE_SPHERE: {
-                const btSphereShape* sphereShape = static_cast<const btSphereShape*>(shape);
-                info.setSphere(sphereShape->getRadius());
-            }
-            break;
-            default:
-                info.clear();
-            break;
-        }
-    } else {
-        info.clear();
-    }
-}
 
 btCollisionShape* ShapeInfoUtil::createShapeFromInfo(const ShapeInfo& info) {
     btCollisionShape* shape = NULL;
@@ -86,6 +32,36 @@ btCollisionShape* ShapeInfoUtil::createShapeFromInfo(const ShapeInfo& info) {
             float radius = halfExtents.x;
             float height = 2.0f * halfExtents.y;
             shape = new btCapsuleShape(radius, height);
+        }
+        break;
+        case SHAPE_TYPE_COMPOUND: {
+            const QVector<QVector<glm::vec3>>& points = info.getPoints();
+            uint32_t numSubShapes = info.getNumSubShapes();
+            if (numSubShapes == 1) {
+                auto hull = new btConvexHullShape();
+                const QVector<QVector<glm::vec3>>& points = info.getPoints();
+                foreach (glm::vec3 point, points[0]) {
+                    btVector3 btPoint(point[0], point[1], point[2]);
+                    hull->addPoint(btPoint, false);
+                }
+                hull->recalcLocalAabb();
+                shape = hull;
+            } else {
+                assert(numSubShapes > 1);
+                auto compound = new btCompoundShape();
+                btTransform trans;
+                trans.setIdentity();
+                foreach (QVector<glm::vec3> hullPoints, points) {
+                    auto hull = new btConvexHullShape();
+                    foreach (glm::vec3 point, hullPoints) {
+                        btVector3 btPoint(point[0], point[1], point[2]);
+                        hull->addPoint(btPoint, false);
+                    }
+                    hull->recalcLocalAabb();
+                    compound->addChildShape (trans, hull);
+                }
+                shape = compound;
+            }
         }
         break;
     }

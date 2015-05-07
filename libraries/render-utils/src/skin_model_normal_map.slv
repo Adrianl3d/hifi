@@ -1,4 +1,4 @@
-<@include Config.slh@>
+<@include gpu/Config.slh@>
 <$VERSION_HEADER$>
 //  Generated on <$_SCRIBE_DATE$>
 //
@@ -11,6 +11,9 @@
 //  Distributed under the Apache License, Version 2.0.
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
+
+<@include gpu/Transform.slh@>
+<$declareStandardTransform()$>
 
 const int MAX_TEXCOORDS = 2;
 const int MAX_CLUSTERS = 128;
@@ -31,6 +34,8 @@ varying vec4 interpolatedNormal;
 // the interpolated tangent
 varying vec4 interpolatedTangent;
 
+varying vec3 color;
+
 void main(void) {
     vec4 interpolatedPosition = vec4(0.0, 0.0, 0.0, 0.0);
     interpolatedNormal = vec4(0.0, 0.0, 0.0, 0.0);
@@ -42,14 +47,23 @@ void main(void) {
         interpolatedNormal += clusterMatrix * vec4(gl_Normal, 0.0) * clusterWeight;
         interpolatedTangent += clusterMatrix * vec4(tangent, 0.0) * clusterWeight;
     }
-    interpolatedNormal = gl_ModelViewMatrix * interpolatedNormal;
-    interpolatedTangent = gl_ModelViewMatrix * interpolatedTangent;
-    
+
     // pass along the diffuse color
-    gl_FrontColor = gl_Color;
+    color = gl_Color.xyz;
 
     // and the texture coordinates
     gl_TexCoord[0] = texcoordMatrices[0] * vec4(gl_MultiTexCoord0.xy, 0.0, 1.0);
     
-    gl_Position = gl_ModelViewProjectionMatrix * interpolatedPosition;
+    interpolatedNormal = vec4(normalize(interpolatedNormal.xyz), 0.0);
+    interpolatedTangent = vec4(normalize(interpolatedTangent.xyz), 0.0);
+
+    // standard transform
+    TransformCamera cam = getTransformCamera();
+    TransformObject obj = getTransformObject();
+    <$transformModelToClipPos(cam, obj, interpolatedPosition, gl_Position)$>
+    <$transformModelToEyeDir(cam, obj, interpolatedNormal.xyz, interpolatedNormal.xyz)$>
+    <$transformModelToEyeDir(cam, obj, interpolatedTangent.xyz, interpolatedTangent.xyz)$>
+
+    interpolatedNormal = vec4(normalize(interpolatedNormal.xyz), 0.0);
+    interpolatedTangent = vec4(normalize(interpolatedTangent.xyz), 0.0);
 }

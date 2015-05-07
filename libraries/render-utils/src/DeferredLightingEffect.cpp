@@ -12,7 +12,6 @@
 // include this before QOpenGLFramebufferObject, which includes an earlier version of OpenGL
 #include <gpu/GPUConfig.h>
 
-#include <QOpenGLFramebufferObject>
 
 #include <GLMHelpers.h>
 #include <PathUtils.h>
@@ -126,17 +125,15 @@ void DeferredLightingEffect::renderSolidCone(float base, float height, int slice
     releaseSimpleProgram();
 }
 
-void DeferredLightingEffect::addPointLight(const glm::vec3& position, float radius, const glm::vec3& ambient,
-        const glm::vec3& diffuse, const glm::vec3& specular, float constantAttenuation,
-        float linearAttenuation, float quadraticAttenuation) {
-    addSpotLight(position, radius, ambient, diffuse, specular, constantAttenuation, linearAttenuation, quadraticAttenuation);    
+void DeferredLightingEffect::addPointLight(const glm::vec3& position, float radius, const glm::vec3& color,
+        float intensity) {
+    addSpotLight(position, radius, color, intensity);    
 }
 
-void DeferredLightingEffect::addSpotLight(const glm::vec3& position, float radius, const glm::vec3& ambient,
-        const glm::vec3& diffuse, const glm::vec3& specular, float constantAttenuation, float linearAttenuation,
-        float quadraticAttenuation, const glm::vec3& direction, float exponent, float cutoff) {
+void DeferredLightingEffect::addSpotLight(const glm::vec3& position, float radius, const glm::vec3& color,
+    float intensity, const glm::quat& orientation, float exponent, float cutoff) {
     
-    int lightID = _pointLights.size() + _spotLights.size() + _globalLights.size();
+    unsigned int lightID = _pointLights.size() + _spotLights.size() + _globalLights.size();
     if (lightID >= _allocatedLights.size()) {
         _allocatedLights.push_back(model::LightPointer(new model::Light()));
     }
@@ -144,8 +141,8 @@ void DeferredLightingEffect::addSpotLight(const glm::vec3& position, float radiu
 
     lp->setPosition(position);
     lp->setMaximumRadius(radius);
-    lp->setColor(diffuse);
-    lp->setIntensity(1.0f);
+    lp->setColor(color);
+    lp->setIntensity(intensity);
     //lp->setShowContour(quadraticAttenuation);
 
     if (exponent == 0.0f && cutoff == PI) {
@@ -153,7 +150,7 @@ void DeferredLightingEffect::addSpotLight(const glm::vec3& position, float radiu
         _pointLights.push_back(lightID);
         
     } else {
-        lp->setDirection(direction);
+        lp->setOrientation(orientation);
         lp->setSpotAngle(cutoff);
         lp->setSpotExponent(exponent);
         lp->setType(model::Light::SPOT);
@@ -185,15 +182,18 @@ void DeferredLightingEffect::render() {
 
     auto textureCache = DependencyManager::get<TextureCache>();
     
-    QOpenGLFramebufferObject* primaryFBO = textureCache->getPrimaryFramebufferObject();
-    primaryFBO->release();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0 );
+
+    QSize framebufferSize = textureCache->getFrameBufferSize();
     
-    QOpenGLFramebufferObject* freeFBO = DependencyManager::get<GlowEffect>()->getFreeFramebufferObject();
-    freeFBO->bind();
+    auto freeFBO = DependencyManager::get<GlowEffect>()->getFreeFramebuffer();
+    glBindFramebuffer(GL_FRAMEBUFFER, gpu::GLBackend::getFramebufferID(freeFBO));
+ 
     glClear(GL_COLOR_BUFFER_BIT);
    // glEnable(GL_FRAMEBUFFER_SRGB);
 
-    glBindTexture(GL_TEXTURE_2D, primaryFBO->texture());
+   // glBindTexture(GL_TEXTURE_2D, primaryFBO->texture());
+    glBindTexture(GL_TEXTURE_2D, textureCache->getPrimaryColorTextureID());
     
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, textureCache->getPrimaryNormalTextureID());
@@ -211,11 +211,13 @@ void DeferredLightingEffect::render() {
     const int VIEWPORT_Y_INDEX = 1;
     const int VIEWPORT_WIDTH_INDEX = 2;
     const int VIEWPORT_HEIGHT_INDEX = 3;
-    float sMin = viewport[VIEWPORT_X_INDEX] / (float)primaryFBO->width();
-    float sWidth = viewport[VIEWPORT_WIDTH_INDEX] / (float)primaryFBO->width();
-    float tMin = viewport[VIEWPORT_Y_INDEX] / (float)primaryFBO->height();
-    float tHeight = viewport[VIEWPORT_HEIGHT_INDEX] / (float)primaryFBO->height();
-   
+
+    float sMin = viewport[VIEWPORT_X_INDEX] / (float)framebufferSize.width();
+    float sWidth = viewport[VIEWPORT_WIDTH_INDEX] / (float)framebufferSize.width();
+    float tMin = viewport[VIEWPORT_Y_INDEX] / (float)framebufferSize.height();
+    float tHeight = viewport[VIEWPORT_HEIGHT_INDEX] / (float)framebufferSize.height();
+
+
     // Fetch the ViewMatrix;
     glm::mat4 invViewMat;
     _viewState->getViewTransform().getMatrix(invViewMat);
@@ -247,7 +249,7 @@ void DeferredLightingEffect::render() {
             program->bind();
         }
         program->setUniformValue(locations->shadowScale,
-            1.0f / textureCache->getShadowFramebufferObject()->width());
+            1.0f / textureCache->getShadowFramebuffer()->getWidth());
         
     } else {
         if (_ambientLightMode > -1) {
@@ -270,6 +272,12 @@ void DeferredLightingEffect::render() {
         if (locations->lightBufferUnit >= 0) {
             gpu::Batch batch;
             batch.setUniformBuffer(locations->lightBufferUnit, globalLight->getSchemaBuffer());
+            gpu::GLBackend::renderBatch(batch);
+        }
+        
+        if (_atmosphere && (locations->atmosphereBufferUnit >= 0)) {
+            gpu::Batch batch;
+            batch.setUniformBuffer(locations->atmosphereBufferUnit, _atmosphere->getDataBuffer());
             gpu::GLBackend::renderBatch(batch);
         }
         glUniformMatrix4fv(locations->invViewMat, 1, false, reinterpret_cast< const GLfloat* >(&invViewMat));
@@ -424,7 +432,9 @@ void DeferredLightingEffect::render() {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, 0);
     
-    freeFBO->release();
+    //freeFBO->release();
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
   //  glDisable(GL_FRAMEBUFFER_SRGB);
     
     glDisable(GL_CULL_FACE);
@@ -433,9 +443,12 @@ void DeferredLightingEffect::render() {
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_CONSTANT_ALPHA, GL_ONE);
     glColorMask(true, true, true, false);
     
-    primaryFBO->bind();
+    auto primaryFBO = gpu::GLBackend::getFramebufferID(textureCache->getPrimaryFramebuffer());
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, primaryFBO);
+
+    //primaryFBO->bind();
     
-    glBindTexture(GL_TEXTURE_2D, freeFBO->texture());
+    glBindTexture(GL_TEXTURE_2D, gpu::GLBackend::getTextureID(freeFBO->getRenderBuffer(0)));
     glEnable(GL_TEXTURE_2D);
     
     glPushMatrix();
@@ -490,18 +503,13 @@ void DeferredLightingEffect::loadLightProgram(const char* fragSource, bool limit
     locations.invViewMat = program.uniformLocation("invViewMat");
 
     GLint loc = -1;
-#if defined(Q_OS_MAC)
-    loc = program.uniformLocation("lightBuffer");
-    if (loc >= 0) {
-        locations.lightBufferUnit = loc;
-    } else {
-        locations.lightBufferUnit = -1;
-    }
-#elif defined(Q_OS_WIN)
+
+#if (GPU_FEATURE_PROFILE == GPU_CORE)
+    const GLint LIGHT_GPU_SLOT = 3;
     loc = glGetUniformBlockIndex(program.programId(), "lightBuffer");
     if (loc >= 0) {
-        glUniformBlockBinding(program.programId(), loc, 0);
-        locations.lightBufferUnit = 0;
+        glUniformBlockBinding(program.programId(), loc, LIGHT_GPU_SLOT);
+        locations.lightBufferUnit = LIGHT_GPU_SLOT;
     } else {
         locations.lightBufferUnit = -1;
     }
@@ -513,20 +521,47 @@ void DeferredLightingEffect::loadLightProgram(const char* fragSource, bool limit
         locations.lightBufferUnit = -1;
     }
 #endif
+
+#if (GPU_FEATURE_PROFILE == GPU_CORE)
+    const GLint ATMOSPHERE_GPU_SLOT = 4;
+    loc = glGetUniformBlockIndex(program.programId(), "atmosphereBufferUnit");
+    if (loc >= 0) {
+        glUniformBlockBinding(program.programId(), loc, ATMOSPHERE_GPU_SLOT);
+        locations.atmosphereBufferUnit = ATMOSPHERE_GPU_SLOT;
+    } else {
+        locations.atmosphereBufferUnit = -1;
+    }
+#else
+    loc = program.uniformLocation("atmosphereBufferUnit");
+    if (loc >= 0) {
+        locations.atmosphereBufferUnit = loc;
+    } else {
+        locations.atmosphereBufferUnit = -1;
+    }
+#endif
+
     program.release();
 }
 
 void DeferredLightingEffect::setAmbientLightMode(int preset) {
-    if ((preset >= -1) && (preset < model::SphericalHarmonics::NUM_PRESET)) {
+    if ((preset >= 0) && (preset < model::SphericalHarmonics::NUM_PRESET)) {
         _ambientLightMode = preset;
         auto light = _allocatedLights.front();
         light->setAmbientSpherePreset(model::SphericalHarmonics::Preset(preset % model::SphericalHarmonics::NUM_PRESET));
+    } else {
+        // force to preset 0
+        setAmbientLightMode(0);
     }
 }
 
-void DeferredLightingEffect::setGlobalLight(const glm::vec3& direction, const glm::vec3& diffuse, float intensity) {
+void DeferredLightingEffect::setGlobalLight(const glm::vec3& direction, const glm::vec3& diffuse, float intensity, float ambientIntensity) {
     auto light = _allocatedLights.front();
     light->setDirection(direction);
     light->setColor(diffuse);
     light->setIntensity(intensity);
+    light->setAmbientIntensity(ambientIntensity);
+}
+
+void DeferredLightingEffect::setGlobalSkybox(const model::SkyboxPointer& skybox) {
+    _skybox = skybox;
 }

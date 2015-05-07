@@ -32,6 +32,7 @@
 
 #include "GLMHelpers.h"
 #include "MatrixStack.h"
+#include "RenderUtilsLogging.h"
 #include "TextRenderer.h"
 
 #include "sdf_text_vert.h"
@@ -180,7 +181,7 @@ Font* loadFont(const QString& family) {
             QFile fontFile(loadFilename);
             fontFile.open(QIODevice::ReadOnly);
             
-            qDebug() << "Loaded font" << loadFilename << "from Qt Resource System.";
+            qCDebug(renderutils) << "Loaded font" << loadFilename << "from Qt Resource System.";
             
             LOADED_FONTS[family] = loadFont(fontFile);
         }
@@ -359,8 +360,12 @@ void Font::setupGL() {
 // FIXME there has to be a cleaner way of doing this
 QStringList Font::tokenizeForWrapping(const QString & str) const {
     QStringList result;
-    foreach(const QString & token1, str.split(" ", QString::SkipEmptyParts)) {
+    foreach(const QString & token1, str.split(" ")) {
         bool lineFeed = false;
+        if (token1.isEmpty()) {
+            result << token1;
+            continue;
+        }
         foreach(const QString & token2, token1.split("\n")) {
             if (lineFeed) {
                 result << "\n";
@@ -444,7 +449,7 @@ glm::vec2 Font::drawString(float x, float y, const QString & str,
             advance.y -= _rowHeight;
             // If we've wrapped right out of the bounds, then we're 
             // done with rendering the tokens
-            if (bounds.y > 0 && abs(advance.y) > bounds.y) {
+            if (bounds.y > 0 && std::abs(advance.y) > bounds.y) {
                 break;
             }
             continue;
@@ -459,7 +464,7 @@ glm::vec2 Font::drawString(float x, float y, const QString & str,
                 advance.y -= _rowHeight;
                 // If we've wrapped right out of the bounds, then we're 
                 // done with rendering the tokens
-                if (bounds.y > 0 && abs(advance.y) > bounds.y) {
+                if (bounds.y > 0 && std::abs(advance.y) > bounds.y) {
                     break;
                 }
             }
